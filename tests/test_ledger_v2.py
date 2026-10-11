@@ -207,7 +207,8 @@ class LedgerV2Tests(unittest.TestCase):
             with self.subTest(boundary=boundary):
                 path = str(Path(self.tmp.name) / (boundary + '.db'))
                 initialize_fixture(path)
-                script = '''import os, sys
+                script = '''import os, sys, runpy
+runpy.run_path('tests/run_offline.py', run_name='fixture_guard')
 import ledger, ledger_requests as r
 sys.path.insert(0, 'tests')
 from ledger_fixtures import fixture_create, fixture_start
@@ -238,11 +239,11 @@ os._exit(17)
         for repeat, limit in (('false', 1), (False, True), (True, 0), (True, 1.5)):
             with self.assertRaises(ValueError): requests.validate_settings(repeat, limit)
         root = Path(__file__).resolve().parents[1]
-        for name in ('cli.py', 'tiktok_tui.py', 'services.py', 'oneshot.py', 'ledger.py', 'ledger_requests.py'):
+        for name in ('relttk/application/cli.py', 'relttk/application/tui.py', 'relttk/application/services.py', 'relttk/transport/oneshot.py', 'relttk/storage/ledger.py', 'relttk/storage/ledger_requests.py'):
             code = (root / name).read_text(encoding='utf-8').upper()
             self.assertNotIn('DELETE FROM', code, name)
             self.assertNotIn('INSERT OR REPLACE', code, name)
-        for name in ('cli.py', 'tiktok_tui.py', 'main.py'):
+        for name in ('relttk/application/cli.py', 'relttk/application/tui.py', 'main.py'):
             self.assertIn('send_plan', (root / name).read_text(encoding='utf-8'))
 
     def test_cli_key_forwarding_and_settings_preserve_plan(self):

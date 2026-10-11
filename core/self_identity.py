@@ -4,7 +4,7 @@ The repository contains no authenticated-self response fixture with established
 provenance. A generic odinId anywhere in HTML cannot establish the logged-in
 account. Do not add an acceptance rule without separately reviewed evidence.
 """
-from circuit_breaker import ProtocolFailure
+from relttk.identity.circuit_breaker import ProtocolFailure
 
 
 def verify_authenticated_self(html):

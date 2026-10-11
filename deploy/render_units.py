@@ -71,8 +71,8 @@ def unit_text(consent, *, grant_id, fingerprint, python, entry, runtime, db):
 def render(*, db, grant_id, fingerprint, python, entry, runtime, output):
     if os.name != 'posix':
         raise ValueError('Actual renderer requires POSIX; Windows unit_text tests are simulations')
-    import runtime_paths as paths
-    import scheduling
+    from relttk import runtime_paths as paths
+    from relttk.runtime import scheduling
     base = paths.root(runtime)
     if paths.root() != base:
         raise ValueError('Explicit TIKTOK_RUNTIME_DIR required')
@@ -87,7 +87,7 @@ def render(*, db, grant_id, fingerprint, python, entry, runtime, output):
         consent, actual, event = scheduling._load(conn, grant_id)
         if actual != fingerprint or event['event_type'] not in ('AUTHORIZED', 'ACTIVATED'):
             raise ValueError('Grant selector/state mismatch')
-        import ledger_requests
+        from relttk.storage import ledger_requests
         if consent['end_ms'] <= ledger_requests.utc_now_ms():
             raise ValueError('Expired grant')
         scheduling._check_config(conn, grant_id, consent)

@@ -17,6 +17,9 @@ _PKG_DIR = os.path.dirname(os.path.abspath(__file__))
 if _PKG_DIR not in sys.path:
     sys.path.insert(0, _PKG_DIR)
 
+from relttk.compat import enable as _enable_legacy_imports
+_enable_legacy_imports()
+
 DEFAULT_CONFIG_FILE = "streak.json"
 
 
@@ -52,13 +55,13 @@ def validate_config(cfg: object) -> Tuple[bool, list[str], list[dict]]:
         if "/" in session_str or "\\" in session_str or ".." in session_str or "\0" in session_str or not re.match(r'^[a-zA-Z0-9_\.-]+$', session_str):
             errors.append(f"Field 'session' has unsafe name {session_str!r}. Path traversal characters are disallowed.")
 
-    import rotation
+    from relttk.runtime import rotation
     try:
         rotation.catalog(cfg)
     except (ValueError, UnicodeError) as exc:
         errors.append(str(exc))
 
-    from ledger_requests import settings_from_config
+    from relttk.storage.ledger_requests import settings_from_config
     try:
         settings_from_config(cfg)
     except ValueError as exc:
@@ -221,9 +224,9 @@ def cmd_send(config_path: str = DEFAULT_CONFIG_FILE, idempotency_key: str | None
     print("=" * 64)
 
     try:
-        import ledger
+        from relttk.storage import ledger
         import asyncio
-        from services import send_plan, send_result_completed
+        from relttk.application.services import send_plan, send_result_completed
         options = {"db_path": db_path} if db_path is not None else {}
         if request_id:
             options['request_id'] = request_id
@@ -275,7 +278,7 @@ def cmd_ws_probe(session_name: str, host: Optional[str] = None) -> int:
         return 1
     try:
         import asyncio
-        import oneshot
+        from relttk.transport import oneshot
         asyncio.run(oneshot.probe_ws_handshake(session_name, host=host))
         print("\n[+] WebSocket handshake succeeded. No message was transmitted.")
         return 0
@@ -293,7 +296,7 @@ def cmd_login() -> int:
 
     print("Starting interactive QR login...")
     try:
-        import qrlogin
+        from relttk.transport import qrlogin
         qrlogin.run()
         return 0
     except Exception as e:
@@ -307,12 +310,12 @@ def cmd_capture_ws_auth(session_name: str) -> int:
         print("[!] Capture browser auth on Windows; see TERMUX.md for transfer instructions.")
         return 1
     try:
-        from ws_auth_capture import capture_session_auth
+        from relttk.transport.ws_auth_capture import capture_session_auth
         capture_session_auth(session_name)
         return 0
     except Exception as exc:
         print(f"[!] Browser auth setup failed: {type(exc).__name__}.")
-        print("    Check optional requirements-auth-windows.txt and Chromium installation, then retry manually.")
+        print("    Check optional requirements/auth-windows.txt and Chromium installation, then retry manually.")
         return 1
 
 
@@ -327,9 +330,9 @@ def cmd_list_conversations(session_name: str) -> int:
         return 1
 
     try:
-        import qrlogin
+        from relttk.transport import qrlogin
         import core.api as api
-        import config
+        from relttk import config
 
         cookies = qrlogin.load_session(session_name)
         if not cookies.get("sessionid"):
@@ -371,7 +374,7 @@ def cmd_status(config_path: str = DEFAULT_CONFIG_FILE, db_path: str | None = Non
     today = get_ho_chi_minh_date()
     print(f"Ledger Status for {today} (Asia/Ho_Chi_Minh):")
     try:
-        import ledger
+        from relttk.storage import ledger
         db_path = db_path or ledger._DEFAULT_LEDGER_PATH
         if not os.path.exists(db_path):
             print("  Ledger database file does not exist yet (clean state).")
@@ -408,7 +411,7 @@ def cmd_status(config_path: str = DEFAULT_CONFIG_FILE, db_path: str | None = Non
 
 
 def cmd_ledger_admin(command, db_path):
-    import ledger_migrations
+    from relttk.storage import ledger_migrations
     try:
         if command == "ledger-initialize":
             ledger_migrations.initialize(db_path)
@@ -436,8 +439,8 @@ def confirm_snapshot(row):
 
 
 def cmd_request_admin(args):
-    import services
-    import ledger
+    from relttk.application import services
+    from relttk.storage import ledger
     try:
         if args.command == 'rotation-skip-selection':
             if not (sys.stdin.isatty() and sys.stdout.isatty()):
@@ -470,8 +473,8 @@ def cmd_request_admin(args):
 
 
 def cmd_breaker_admin(args):
-    import ledger
-    import services
+    from relttk.storage import ledger
+    from relttk.application import services
     try:
         rows = services.breaker_status(db_path=args.db, account=args.account, session=args.session,
                                        history=args.command == 'breaker-history')
@@ -496,8 +499,8 @@ def cmd_breaker_admin(args):
 
 def cmd_queue_admin(args):
     import asyncio
-    import ledger
-    import services
+    from relttk.storage import ledger
+    from relttk.application import services
     try:
         if args.command == 'queue-enqueue':
             result = services.queue_enqueue(args.config, args.idempotency_key, db_path=args.db, apply=args.apply)
@@ -533,9 +536,9 @@ def cmd_queue_admin(args):
 
 
 def cmd_unknown_admin(args):
-    import ledger
-    import services
-    import unknown_resolution
+    from relttk.storage import ledger
+    from relttk.application import services
+    from relttk.runtime import unknown_resolution
     try:
         preview = services.unknown_preview(args.request_id, db_path=args.db)
         print(json.dumps(preview, ensure_ascii=True, indent=2))
@@ -562,7 +565,7 @@ def cmd_unknown_admin(args):
 
 
 def cmd_readiness_admin(args):
-    import services
+    from relttk.application import services
     try:
         if args.command == 'runtime-preflight':
             result = services.runtime_preflight(args.runtime_dir, args.db, args.config,
@@ -596,8 +599,8 @@ def cmd_readiness_admin(args):
 def cmd_worker_admin(args):
     import asyncio
     import signal
-    import services
-    import ledger
+    from relttk.application import services
+    from relttk.storage import ledger
     try:
         if args.command in ('worker-preview', 'worker-authorize'):
             expires = None
@@ -658,8 +661,8 @@ def cmd_worker_admin(args):
 def cmd_schedule_admin(args):
     import asyncio
     import signal
-    import services
-    import ledger
+    from relttk.application import services
+    from relttk.storage import ledger
     try:
         if args.command in ('schedule-preview', 'schedule-authorize'):
             review = services.schedule_preview(args.config, args.schedule_id, db_path=args.db,
@@ -692,7 +695,7 @@ def cmd_schedule_admin(args):
                     for sig,handler in previous.items(): signal.signal(sig,handler)
             result=asyncio.run(execute())
             if args.operational_output:
-                import operations
+                from relttk import operations
                 operations.note(result)
             print(json.dumps(result,ensure_ascii=True,indent=2))
             state=result.get('worker',result).get('state')
@@ -876,17 +879,17 @@ def main() -> int:
 
     if args.command in ('operational-status', 'ledger-backup'):
         try:
-            import services
+            from relttk.application import services
             if args.command == 'operational-status':
                 result = services.operational_status(args.grant_id, db_path=args.db)
             else:
                 result = services.ledger_backup(args.db, args.destination)
-            import operations
+            from relttk import operations
             operations.note(result)
             print(json.dumps(operations.metadata(result), separators=(',', ':')))
             return 0 if result['state'] == 'BACKUP_COMPLETE' else 2
         except Exception as exc:
-            import operations
+            from relttk import operations
             reason = str(exc)
             result = dict(state='BLOCKED', reason=reason if reason in operations.REASONS else 'OPERATION_FAILED')
             operations.note(result)
@@ -920,9 +923,9 @@ def main() -> int:
         return cmd_ws_probe(session_name=args.session, host=args.host)
     elif args.command == "tui":
         try:
-            from tiktok_tui import TikTokTUI
+            from relttk.application.tui import TikTokTUI
         except ModuleNotFoundError:
-            print("[!] Optional TUI dependencies missing: install requirements-tui.txt.")
+            print("[!] Optional TUI dependencies missing: install requirements/tui.txt.")
             return 1
         TikTokTUI().run()
         return 0
@@ -943,6 +946,6 @@ def main() -> int:
 
 if __name__ == "__main__":
     if '--operational-output' in sys.argv:
-        from operations import cli_entry
+        from relttk.operations import cli_entry
         sys.exit(cli_entry(main))
     sys.exit(main())

@@ -38,6 +38,8 @@ def guard(event, args):
             raise RuntimeError('Review blocked real runtime data')
 
 sys.addaudithook(guard)
+from relttk.compat import enable
+enable()
 if __name__ == '__main__':
     suite = unittest.defaultTestLoader.discover(str(ROOT / 'tests'))
     output = io.StringIO()

@@ -74,7 +74,7 @@ class TUIServiceTests(unittest.TestCase):
             self.assertEqual(read_json_object(path),value)
 
     def test_ui_has_no_send_cli_flag(self):
-        code=(Path(__file__).resolve().parents[1] / 'tiktok_tui.py').read_text(encoding='utf-8')
+        code=(Path(__file__).resolve().parents[1] / 'relttk/application/tui.py').read_text(encoding='utf-8')
         self.assertNotIn('"--send"',code)
         self.assertNotIn("'--send'",code)
         self.assertIn('"--dry-run"',code)
