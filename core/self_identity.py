@@ -5,6 +5,7 @@ provenance. A generic odinId anywhere in HTML cannot establish the logged-in
 account. Do not add an acceptance rule without separately reviewed evidence.
 """
 import json
+from multiprocessing import context
 import re
 from html import unescape
 from relttk.identity.circuit_breaker import ProtocolFailure
@@ -26,7 +27,23 @@ def extract_self_uid_candidate(html: str) -> str:
 
     try:
         data = json.loads(unescape(matches[0]))
-        uid = data["__DEFAULT_SCOPE__"]["webapp.app-context"]["odinId"]
+        context = data["__DEFAULT_SCOPE__"]["webapp.app-context"]
+        uid = context["odinId"]
+        user = context["user"]
+
+        if not isinstance(user, dict):
+            raise ProtocolFailure("SELF_USER_INVALID")
+
+        user_uid = user.get("uid")
+        sec_uid = user.get("secUid")
+
+        if (
+            not isinstance(user_uid, str)
+            or user_uid != uid
+            or not isinstance(sec_uid, str)
+            or not sec_uid.strip()
+        ):
+            raise ProtocolFailure("SELF_IDENTITY_MISMATCH")
     except (ValueError, TypeError, KeyError):
         raise ProtocolFailure("SELF_DATA_INVALID") from None
 
