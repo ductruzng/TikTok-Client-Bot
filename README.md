@@ -118,6 +118,7 @@ Core CLI requirements remain separate from optional components:
 ```sh
 python -m pip install -r requirements.txt
 python -B main.py --help
+python -m pip install -r requirements/tui.txt  # full guarded UI coverage
 python -B tests/run_offline.py
 ```
 
@@ -129,6 +130,11 @@ Textual UI coverage; a core-only environment with additional UI skips is not
 an equivalent result. `requirements/tui.txt` is available for the disposable
 full-test fixture. Windows auth/cookie extras are in
 `requirements/auth-windows.txt` and `requirements/windows.txt`.
+
+For Debian core-only installation, Textual is still optional. Install
+`requirements/tui.txt` in the disposable full-test venv before claiming the full
+regression baseline; otherwise the TUI execution case is explicitly skipped.
+See [Debian staging harness fix](docs/operations/DEBIAN13_STAGING_FIX.md).
 
 Use the guarded runner rather than an unrestricted test discovery command.
 It blocks external networking and protected runtime-data access while tests
