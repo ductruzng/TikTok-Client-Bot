@@ -19,27 +19,33 @@ def posix_path(value):
 
 
 def workload(consent):
-    """Conservative supported profile; large grants require separate review.
+    """One/two-recipient profile; bounded inbox child and WS deadlines.
 
-    Do not pretend the HTTP pagination timeout establishes a global bound.
-    One recipient avoids multiplying the unmeasured pre-marker setup path.
-    Watchdogs still bound process lifetime; kill recovery remains UNKNOWN.
+    Host startup/termination overhead still requires native Debian validation.
     """
     targets = consent.get('policy', {}).get('targets')
-    if not isinstance(targets, list) or len(targets) != 1 or consent.get('daily_budget') != 1:
+    if not isinstance(targets, list) or len(targets) not in (1, 2) or consent.get('daily_budget') != len(targets):
         raise ValueError('UNSUPPORTED_WORKLOAD')
     wait = consent.get('max_wait')
     if type(wait) is not int or not 0 <= wait <= 300:
         raise ValueError('UNSUPPORTED_WORKLOAD')
     minutes = consent.get('window_minutes')
-    if type(minutes) is not int or minutes < 10:
+    minimum = 10 if len(targets) == 1 else 15
+    if type(minutes) is not int or minutes < minimum:
         raise ValueError('UNSUPPORTED_WORKLOAD')
     clock = consent.get('time', '')
     if not isinstance(clock, str) or not re.fullmatch(r'(?:[01]\d|2[0-3]):[0-5]\d', clock):
         raise ValueError('UNSUPPORTED_WORKLOAD')
     hour, minute = map(int, clock.split(':'))
-    if 1440-hour*60-minute < 10:
+    if 1440-hour*60-minute < minimum:
         raise ValueError('UNSUPPORTED_WORKLOAD')
+    if len(targets) == 2:
+        interval = consent['policy'].get('min_send_interval_seconds', 60)
+        window_limit = consent['policy'].get('max_sends_per_window', 5)
+        if type(interval) is not int or not 0 <= interval <= wait or type(window_limit) is not int or window_limit < 2:
+            raise ValueError('UNSUPPORTED_WORKLOAD')
+        return dict(recipients=2, startup_seconds=900, stop_seconds=90,
+                    profile_seconds=wait+2*120+90, host_verified=False)
     # Internal wait + conservative setup allowance + one echo + stop grace.
     return dict(recipients=1, startup_seconds=600, stop_seconds=90,
                 profile_seconds=wait+120+30+90, host_verified=False)
@@ -54,7 +60,7 @@ def unit_text(consent, *, grant_id, fingerprint, python, entry, runtime, db):
         posix_path(value)
     if PurePosixPath(runtime) not in PurePosixPath(db).parents:
         raise ValueError('Database outside runtime')
-    workload(consent)
+    profile = workload(consent)
     substitutions = dict(PYTHON=python, ENTRY=entry, RUNTIME=runtime, DB=db,
                          GRANT_ID=grant_id, FINGERPRINT=fingerprint, WORKDIR=str(PurePosixPath(entry).parent))
     result = {}
@@ -62,6 +68,8 @@ def unit_text(consent, *, grant_id, fingerprint, python, entry, runtime, db):
         text = (Path(__file__).parent/'systemd'/('relttk.'+kind+'.in')).read_text(encoding='utf-8')
         for name, value in substitutions.items():
             text = text.replace('@'+name+'@', value)
+        if kind == 'service':
+            text = text.replace('TimeoutStartSec=600', 'TimeoutStartSec='+str(profile['startup_seconds']))
         if '@' in text or '%' in text or '$' in text:
             raise ValueError('Unresolved or unsafe unit expansion')
         result['relttk-'+grant_id+'.'+kind] = text
@@ -116,7 +124,7 @@ def main():
         print('ARTIFACTS_RENDERED; identity BLOCKED; not installed or activated')
         return 0
     except Exception:
-        print('RENDER_REFUSED; verify paths, selector and supported one-recipient workload')
+        print('RENDER_REFUSED; verify paths, selector and supported one/two-recipient workload')
         return 3
 
 

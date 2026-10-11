@@ -131,32 +131,32 @@ class TUISmoke(unittest.IsolatedAsyncioTestCase):
     async def test_legacy_enabled_preference_shows_disabled_scheduler_and_preserves_plan(self):
         import tiktok_tui as tui
         from services import Conversation
-        from textual.widgets import Input, Static, Switch
+        from textual.widgets import Input, Static, Switch, TextArea
         cfg={'session':'fixture','message':'saved message','targets':[{'conv_id':'a','conv_short_id':1,'conv_type':1}]}
         prefs={'enabled':True,'time':'09:30'}
         def read(path):return dict(prefs if path==tui.PREFS_PATH else cfg)
-        with patch.object(tui,'list_sessions',return_value=['fixture']),patch.object(tui,'read_json_object',side_effect=read),\
-             patch.object(tui,'save_plan') as save,patch.object(tui,'save_preferences') as save_prefs,\
+        with tempfile.TemporaryDirectory() as tmp, patch.object(ledger,'_DEFAULT_LEDGER_PATH',str(Path(tmp)/'fixture.db')),\
+             patch.object(tui,'list_sessions',return_value=['fixture']),patch.object(tui,'read_json_object',side_effect=read),\
+             patch.object(tui,'fetch_inbox',return_value=[Conversation('a',1,1,'Fixture')]),\
+             patch.object(tui,'save_plan') as save,patch('relttk.application.services.save_preferences') as save_prefs,\
              patch.object(tui.TikTokTUI,'_run_send') as send:
             app=tui.TikTokTUI()
             async with app.run_test() as pilot:
                 await pilot.pause()
-                control=app.query_one('#enable-schedule',Switch)
-                self.assertFalse(control.value);self.assertTrue(control.disabled)
-                text=str(app.query_one('#info',Static).content)
-                self.assertIn('VÔ HIỆU HÓA',text);self.assertIn('recurring consent',text)
+                self.assertFalse(app.query('#enable-schedule'))
+                text=str(app.query_one('#statusbar',Static).content)
+                self.assertIn('TẮT',text);self.assertIn('recurring consent',text)
                 self.assertNotIn('Scheduler: BẬT',text)
-                self.assertEqual(app.query_one('#message',Input).value,'saved message')
-                self.assertEqual(app.query_one('#send-time',Input).value,'09:30')
+                self.assertEqual(app.query_one('#message',TextArea).text,'saved message')
+                self.assertFalse(app.query('#send-time'))
                 # Even an in-process value change cannot persist active legacy preferences.
-                control.value=True
                 app.loaded_for='fixture';app.conversations=[Conversation('a',1,1,'Fixture')];app.selected_ids={'a'}
                 app._save_all()
                 save.assert_called_once()
                 self.assertEqual(save.call_args.args[:2],('fixture','saved message'))
-                save_prefs.assert_called_once_with('09:30',False,skip_if_sent=True)
+                save_prefs.assert_not_called()
                 app._update_summary()
-                self.assertNotIn('Scheduler: BẬT',str(app.query_one('#info',Static).content))
+                self.assertNotIn('Scheduler: BẬT',str(app.query_one('#statusbar',Static).content))
                 send.assert_not_called()
                 self.assertEqual(prefs['enabled'],True)  # Reads do not rewrite the old file.
 
@@ -168,7 +168,7 @@ class TUISmoke(unittest.IsolatedAsyncioTestCase):
                 patch.object(TikTokTUI, "_run_send") as send:
             app = TikTokTUI()
             async with app.run_test():
-                self.assertFalse(app.query_one("#enable-schedule", Switch).value)
+                self.assertFalse(app.query('#enable-schedule'))
                 self.assertFalse(hasattr(app, '_check_schedule'))
-                self.assertTrue(app.query_one('#enable-schedule', Switch).disabled)
+                self.assertIn('Scheduler: TẮT',str(app.query_one('#statusbar').content))
                 send.assert_not_called()

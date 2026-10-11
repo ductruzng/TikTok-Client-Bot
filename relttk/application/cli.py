@@ -155,7 +155,7 @@ def menu_config_message():
         return
     old_msg = cfg.get("message", "(Chưa có)")
     print(f"Nội dung hiện tại: {old_msg}")
-    new_msg = input("Nhập nội dung mới (để trống để giữ nguyên): ").strip()
+    new_msg = input("Nhập nội dung mới (để trống để giữ nguyên): ")
     
     if new_msg:
         try:

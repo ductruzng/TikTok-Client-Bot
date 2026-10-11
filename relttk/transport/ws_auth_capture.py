@@ -1,4 +1,4 @@
-"""Optional Windows browser auth setup. Captures in memory, probes without a DM,
+"""Explicit optional Windows/Debian browser auth setup. Captures in memory, probes without a DM,
 and writes session-bound credentials only after a successful handshake.
 """
 
@@ -6,6 +6,8 @@ import asyncio
 import hashlib
 import re
 import sys
+from contextlib import ExitStack
+from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
 TARGET_URL = "https://www.tiktok.com/messages"
@@ -32,9 +34,12 @@ def valid_pair(ttwid, access_key):
 
 def capture_for_cookies(cookies_dict: dict = None, headless: bool = True):
     from playwright.sync_api import sync_playwright
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=headless)
+    with sync_playwright() as playwright, ExitStack() as cleanup:
+        browser = playwright.chromium.launch(headless=headless, timeout=15_000)
+        cleanup.callback(browser.close)
         context = browser.new_context(viewport={"width": 1280, "height": 850})
+        cleanup.callback(context.close)
+        context.set_default_timeout(15_000)
 
         if cookies_dict:
             playwright_cookies = []
@@ -109,7 +114,7 @@ def capture_for_cookies(cookies_dict: dict = None, headless: bool = True):
             for tab in context.pages:
                 attach(tab)
             page = context.pages[0] if context.pages else context.new_page()
-            page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=60_000)
+            page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=30_000)
             print("[+] Monitoring for WebSockets (max 30 seconds)...")
             
             # Instead of waiting a fixed 30s, we wait in chunks and return early if we found a good connection
@@ -134,14 +139,29 @@ def capture_for_cookies(cookies_dict: dict = None, headless: bool = True):
                 return found_pair
             return None
         finally:
-            context.close()
-            browser.close()
+            records.clear()
+
+
+def browser_preflight():
+    """Local executable check only: no cookies, browser launch or network."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return {'state': 'BLOCKED', 'reason': 'PLAYWRIGHT_NOT_INSTALLED'}
+    try:
+        with sync_playwright() as playwright:
+            exists = Path(playwright.chromium.executable_path).is_file()
+        return {'state': 'LOCAL_READY' if exists else 'BLOCKED',
+                'reason': 'EXECUTABLE_ONLY_NATIVE_SANDBOX_UNVERIFIED' if exists else 'CHROMIUM_NOT_INSTALLED'}
+    except Exception:
+        return {'state': 'BLOCKED', 'reason': 'PLAYWRIGHT_DRIVER_UNAVAILABLE'}
 
 
 def capture_session_auth(session_name: str, cookies: dict | None = None) -> None:
     from relttk.transport.qrlogin import load_session, write_private_json, ws_auth_path
     path = ws_auth_path(session_name)
-    if cookies is None:
+    saved_session = cookies is None
+    if saved_session:
         cookies = load_session(session_name)
     if not cookies.get("sessionid"):
         raise ValueError("A saved authenticated session is required")
@@ -152,6 +172,8 @@ def capture_session_auth(session_name: str, cookies: dict | None = None) -> None
     from relttk.transport.oneshot import probe_ws_handshake
     # Probe the candidate in memory; never temporarily replace global credentials.
     asyncio.run(probe_ws_handshake(session_name, ws_auth=auth))
+    if saved_session and load_session(session_name) != cookies:
+        raise ValueError('SESSION_CHANGED_DURING_CAPTURE')
     payload = {**auth, "session": session_name,
                "session_hash": hashlib.sha256(cookies["sessionid"].encode()).hexdigest()}
     write_private_json(path, payload)

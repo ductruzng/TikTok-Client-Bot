@@ -10,330 +10,207 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from rich.text import Text
 
 from textual.app import App, ComposeResult
+from textual.screen import ModalScreen
+from textual.theme import Theme
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual import work
 from textual.widgets import (
-    Button, DataTable, Footer, Header, Input, Label, RichLog,
-    Select, Static, Switch,
+    Button, DataTable, Footer, Input, RichLog,
+    Select, Static, TextArea, ContentSwitcher,
 )
 
 from relttk.application.services import (
     CONFIG_PATH, PREFS_PATH, ROOT, Conversation,
     fetch_inbox, list_sessions, matching_selected_ids,
-    read_json_object, save_plan, save_preferences,
+    read_json_object, save_plan,
 )
+
+
+class SendNowReview(ModalScreen):
+    DEFAULT_CSS = '''SendNowReview { align: center middle; }
+    #send-review { width: 90%; max-width: 90; height: 80%; border: round $accent; background: $surface; padding: 1; }
+    #send-review Static { height: auto; }'''
+
+    def __init__(self, policy):
+        super().__init__()
+        self.policy = policy
+
+    def compose(self):
+        with VerticalScroll(id='send-review'):
+            yield Static('Kiểm tra trước khi gửi', classes='panel-title')
+            yield Static('Tài khoản: '+str(self.policy.get('session', '')), markup=False)
+            yield Static('Người nhận:\n'+'\n'.join(str(t['conv_id']) for t in self.policy.get('targets', [])), markup=False)
+            yield Static(str(self.policy.get('message', '')), markup=False)
+            yield Static('CHƯA THỂ GỬI: danh tính tài khoản chưa được xác minh. Không gửi tin, không tạo request hay bỏ qua hạn mức.', classes='ui-warning')
+            yield Static('Server xác nhận không có nghĩa người nhận đã đọc hoặc tin được tính streak.', classes='ui-muted')
+            yield Button('Xác nhận gửi (đang bị chặn)', disabled=True)
+            yield Button('Đóng', id='send-review-close')
+
+    def on_button_pressed(self, event):
+        if event.button.id == 'send-review-close':
+            self.dismiss()
+
+
+class Dashboard(Horizontal):
+    def on_resize(self, event) -> None:
+        self.set_class(event.size.height < 28, 'short')
+        self.app.call_after_refresh(self.app._fit_table)
 
 
 class TikTokTUI(App):
     TITLE = "TikTok Streak Manager"
-    SUB_TITLE = "Modern All-in-One Dashboard"
-    
     CSS = """
-    Screen {
-        background: #0b0f19;
-        color: #e2e8f0;
-    }
-
-    Header {
-        background: #111827;
-        color: #38bdf8;
-        dock: top;
-        height: 1;
-    }
-
-    Footer {
-        background: #111827;
-        color: #94a3b8;
-        dock: bottom;
-        height: 1;
-    }
-
-    #main-container {
-        height: 1fr;
-        layout: horizontal;
-        padding: 0 1;
-    }
-
-    /* LEFT SIDEBAR: Controls */
-    #sidebar {
-        width: 48;
-        height: 1fr;
-        background: #161f30;
-        border: round #334155;
-        padding: 1;
-        margin-right: 1;
-    }
-
-    #sidebar:focus-within {
-        border: round #38bdf8;
-    }
-
-    .panel-title {
-        color: #38bdf8;
-        text-style: bold;
-        margin-bottom: 0;
-    }
-
-    .section-label {
-        color: #94a3b8;
-        text-style: bold;
-        margin-top: 1;
-        margin-bottom: 0;
-    }
-
-    /* Account row */
-    #account-row {
-        height: 3;
-        margin-bottom: 0;
-    }
-
-    #account {
-        width: 1fr;
-        margin-bottom: 0;
-    }
-
-    .icon-btn {
-        min-width: 6;
-        height: 3;
-        margin-left: 1;
-        padding: 0 1;
-    }
-
-    /* Inputs */
-    Input {
-        background: #0b0f19;
-        border: tall #334155;
-        color: #f8fafc;
-        margin-bottom: 0;
-    }
-
-    Input:focus {
-        border: tall #38bdf8;
-    }
-
-    Select {
-        background: #0b0f19;
-        border: tall #334155;
-        margin-bottom: 0;
-    }
-
-    Select:focus {
-        border: tall #38bdf8;
-    }
-
-    /* Schedule inputs */
-    #time-row {
-        height: 3;
-        align-vertical: middle;
-        margin-top: 0;
-        margin-bottom: 0;
-    }
-
-    #time-label {
-        width: 1fr;
-        color: #cbd5e1;
-        padding-top: 1;
-    }
-
-    #send-time {
-        width: 12;
-        margin-bottom: 0;
-    }
-
-    .switch-row {
-        height: auto;
-        align-vertical: middle;
-        margin-top: 1;
-    }
-
-    .switch-text {
-        width: 1fr;
-        color: #cbd5e1;
-    }
-
-    Switch {
-        margin-left: 1;
-    }
-
-    /* Action Buttons */
-    #save-all {
-        width: 100%;
-        height: 3;
-        margin-top: 1;
-        margin-bottom: 0;
-    }
-
-    .action-row {
-        height: 3;
-        margin-top: 1;
-        margin-bottom: 0;
-    }
-
-    .half-btn {
-        width: 1fr;
-        height: 3;
-    }
-
-    #send-now {
-        margin-right: 1;
-    }
-
-    #info {
-        color: #94a3b8;
-        margin-top: 1;
-        height: auto;
-    }
-
-    /* RIGHT CONTENT PANE */
-    #content-pane {
-        width: 1fr;
-        height: 1fr;
-        layout: vertical;
-    }
-
-    #inbox-card {
-        height: 58%;
-        background: #161f30;
-        border: round #334155;
-        padding: 1;
-        margin-bottom: 1;
-    }
-
-    #inbox-card:focus-within {
-        border: round #38bdf8;
-    }
-
-    #log-card {
-        height: 42%;
-        background: #161f30;
-        border: round #334155;
-        padding: 1;
-    }
-
-    #log-card:focus-within {
-        border: round #38bdf8;
-    }
-
-    #search {
-        width: 100%;
-        margin-bottom: 1;
-    }
-
-    #table-toolbar {
-        height: 3;
-        margin-bottom: 1;
-        align-vertical: middle;
-    }
-
-    #table-toolbar Button {
-        height: 3;
-        margin-right: 1;
-        min-width: 12;
-    }
-
-    #inbox-counter {
-        color: #38bdf8;
-        padding-top: 1;
-        margin-left: 1;
-        width: 1fr;
-    }
-
-    #table {
-        height: 1fr;
-        background: #0b0f19;
-        border: tall #1e293b;
-    }
-
-    #activity {
-        height: 1fr;
-        background: #0b0f19;
-        border: tall #1e293b;
-        color: #94a3b8;
-    }
+    Screen { background: #0e1116; color: #e6e9ef; }
+    .panel-title { height: auto; text-style: bold; color: #4fb8c9; }
+    .ui-muted { height: auto; color: #8b95a5; }
+    .ui-warning { height: auto; color: #e0b050; }
+    Button { background: #161b22; }
+    Button.-primary { background: #4fb8c9; color: #0e1116; }
+    #topbar { height: 3; background: #161b22; }
+    #brand { width: 1fr; padding: 1 1; height: 3; }
+    #account { width: 22; border: none; }
+    #topbar Button { min-width: 5; height: 3; padding: 0 1; }
+    #settings-open { width: 15; }
+    #main-container { height: 1fr; }
+    #navigation { width: 18; border-right: solid #2a313c; padding: 1 0; background: #161b22; }
+    #navigation Button { width: 100%; min-width: 10; height: 3; border: none; }
+    #pages { width: 1fr; height: 1fr; }
+    #conversations-page { padding: 0 1; }
+    #inbox-card { height: 1fr; }
+    #search-row { height: 3; }
+    #search { width: 1fr; }
+    #filter { width: 20; border: none; }
+    Input { height: 3; border: tall #2a313c; background: #0e1116; }
+    Input:focus { border: tall #4fb8c9; }
+    #table-toolbar { height: 3; }
+    #table-toolbar Button { min-width: 10; height: 3; padding: 0 1; }
+    #inbox-counter { width: 1fr; padding: 1 1; }
+    #inbox-notice { height: 2; color: #8b95a5; }
+    .short #inbox-notice { height: 1; }
+    #inbox-notice.error { color: #e0676a; }
+    #table { height: 1fr; border: tall #2a313c; background: #0e1116; }
+    DataTable > .datatable--header { background: #161b22; color: #e6e9ef; text-style: bold; }
+    #message-card { height: 9; padding-top: 1; }
+    .short #message-card { height: 5; padding-top: 0; }
+    .short #message-caption { display: none; }
+    .short #message { height: 2; border: none; }
+    .short #table-toolbar { height: 1; }
+    .short #table-toolbar Button { height: 1; border: none; }
+    .short #inbox-counter { padding: 0 1; }
+    #message { height: 4; border: tall #2a313c; background: #0e1116; }
+    #message:focus { border: tall #4fb8c9; }
+    #message-caption { height: 1; color: #4fb8c9; text-style: bold; }
+    #message-state { width: 1fr; padding: 1 0; }
+    #message-state.saved { color: #5fbf7a; }
+    #message-state.draft { color: #e0b050; }
+    #message-save-row, #main-actions { height: 3; }
+    #save-all { height: 3; min-width: 23; }
+    #main-actions Button { height: 3; min-width: 14; }
+    #schedule-page { padding: 1 2; }
+    #schedule-overview, #schedule-message, #schedule-status { height: auto; }
+    #schedule-message { border: tall #2a313c; padding: 0 1; }
+    #schedule-manager { width: 100%; height: 3; }
+    #logs-page { padding: 1; }
+    #activity { height: 1fr; border: tall #2a313c; background: #0e1116; }
+    #statusbar { height: 2; background: #161b22; padding: 0 1; }
+    Footer { height: 1; background: #161b22; }
     """
 
     BINDINGS = [
-        ("ctrl+r", "refresh", "Làm mới tài khoản"),
+        ("f2", "settings", "Cài đặt"),
+        ("ctrl+r", "refresh", "Làm mới tất cả"),
         ("ctrl+s", "sync", "Đồng bộ Inbox"),
         ("ctrl+q", "quit", "Thoát"),
     ]
 
     def __init__(self):
         super().__init__()
+        self.register_theme(Theme(name='streak', primary='#4fb8c9', accent='#4fb8c9',
+            secondary='#8b95a5', foreground='#e6e9ef', background='#0e1116',
+            surface='#161b22', panel='#161b22', success='#5fbf7a',
+            warning='#e0b050', error='#e0676a'))
+        self.theme = 'streak'
         self.conversations: list[Conversation] = []
         self.selected_ids: set[str] = set()
         self.loaded_for: str | None = None
         self._initialized = False
         self._fetching = False
+        self._generation = 0
+        self._draft_session = ''
+        self._drafts = {}
+        self._sync_requested = False
+        self._sync_context = None
+        self._inbox_error = None
 
     def compose(self) -> ComposeResult:
-        yield Header()
-        with Horizontal(id="main-container"):
-            # LEFT SIDEBAR
-            with VerticalScroll(id="sidebar"):
-                yield Static("⚙️ BẢNG ĐIỀU KHIỂN & CẤU HÌNH", classes="panel-title")
-                
-                # Section 1: Account
-                yield Static("👤 Tài khoản TikTok:", classes="section-label")
-                with Horizontal(id="account-row"):
-                    yield Select([], prompt="-- Chọn tài khoản --", allow_blank=True, id="account")
-                    yield Button("🔄", id="refresh", classes="icon-btn")
-                    yield Button("📷 QR", id="login", classes="icon-btn")
-
-                # Section 2: Message Content
-                yield Static("📝 Tin nhắn duy trì streak:", classes="section-label")
-                yield Input(placeholder="Nhập nội dung tin nhắn gửi...", id="message")
-
-                # Section 3: Schedule & Policies
-                yield Static("⏰ Giờ tham khảo cho lịch CLI:", classes="section-label")
-                with Horizontal(id="time-row"):
-                    yield Static("Giờ gửi (HH:MM):", id="time-label")
-                    yield Input(value="08:00", id="send-time")
-                
-                with Horizontal(classes="switch-row"):
-                    yield Static("Scheduler TUI đã vô hiệu hóa. Lịch CLI cần recurring consent.", classes="switch-text")
-                    yield Switch(value=False, disabled=True, id="enable-schedule")
-
-                with Horizontal(classes="switch-row"):
-                    yield Static("Bỏ qua nếu đã gửi hôm nay:", classes="switch-text")
-                    yield Switch(value=True, id="skip-sent")
-
-                # Section 4: Action Buttons
-                yield Button("💾 LƯU CẤU HÌNH", id="save-all", variant="primary")
-                with Horizontal(classes="action-row"):
-                    yield Button("⚡ GỬI NGAY", id="send-now", variant="success", classes="half-btn")
-                    yield Button("🧪 DRY-RUN", id="dryrun", variant="default", classes="half-btn")
-
-                yield Static("Trạng thái: Chưa chọn tài khoản", id="info")
-
-            # RIGHT CONTENT
-            with Vertical(id="content-pane"):
-                # Inbox Card
-                with Vertical(id="inbox-card"):
-                    yield Static("👥 DANH SÁCH HỘI THOẠI (BẠN BÈ & NHÓM)", classes="panel-title")
-                    yield Input(placeholder="🔍 Tìm bạn bè, nhóm hoặc ID hội thoại...", id="search")
-                    with Horizontal(id="table-toolbar"):
-                        yield Button("🔄 Đồng bộ Inbox", id="sync", variant="primary")
-                        yield Button("✓ Chọn tất cả", id="select-visible")
-                        yield Button("✕ Bỏ chọn", id="clear-selection")
-                        yield Static("Chưa đồng bộ hộp thoại", id="inbox-counter")
-                    yield DataTable(id="table", cursor_type="row", zebra_stripes=True)
-
-                # Activity Log Card
-                with Vertical(id="log-card"):
-                    yield Static("📜 NHẬT KÝ HOẠT ĐỘNG (LIVE LOGS)", classes="panel-title")
+        with Horizontal(id="topbar"):
+            yield Static("TikTok Streak Manager", id="brand")
+            yield Select([], prompt="Chọn tài khoản", allow_blank=True, id="account")
+            yield Button("↻", id="refresh", tooltip="Làm mới toàn bộ; giữ bản nháp")
+            yield Button("QR", id="login")
+            yield Button("Cài đặt F2", id="settings-open")
+        with Dashboard(id="main-container"):
+            with Vertical(id="navigation"):
+                yield Button("Hội thoại", id="nav-conversations", variant="primary")
+                yield Button("Lịch gửi", id="nav-schedule")
+                yield Button("Nhật ký", id="nav-logs")
+            with ContentSwitcher(initial="conversations-page", id="pages"):
+                with Vertical(id="conversations-page"):
+                    with Vertical(id="inbox-card"):
+                        with Horizontal(id="search-row"):
+                            yield Input(placeholder="Tìm tên, nhóm, ID…", id="search")
+                            yield Select([("Tất cả", "all"), ("Cá nhân", "direct"), ("Nhóm", "group")],
+                                value="all", allow_blank=False, id="filter")
+                        with Horizontal(id="table-toolbar"):
+                            yield Button("Chọn hết", id="select-visible")
+                            yield Button("Bỏ chọn", id="clear-selection")
+                            yield Static("Chưa đồng bộ", id="inbox-counter")
+                        yield Static('', id='inbox-notice', markup=False)
+                        yield DataTable(id="table", cursor_type="row", zebra_stripes=True)
+                    with Vertical(id="message-card"):
+                        yield Static("TIN NHẮN STREAK", id="message-caption")
+                        yield TextArea(id="message")
+                        with Horizontal(id="message-save-row"):
+                            yield Static("Chưa lưu", id="message-state")
+                            yield Button("Lưu tin & người nhận", id="save-all")
+                    with Horizontal(id="main-actions"):
+                        yield Button("Gửi ngay", id="send-now", variant="primary")
+                        yield Button("Chạy thử", id="dryrun")
+                with VerticalScroll(id="schedule-page"):
+                    yield Static("LỊCH GỬI", classes="panel-title")
+                    yield Static("", id="schedule-overview", markup=False)
+                    yield Static("TIN NHẮN ĐÃ LƯU", classes='panel-title')
+                    yield Static("Chưa có nội dung đã lưu", id="schedule-message", markup=False)
+                    yield Static("Chỉnh nội dung và người nhận tại Hội thoại, rồi lưu trước khi tạo lịch.", classes='ui-muted')
+                    yield Button("Cấu hình / quản lý lịch gửi", id="schedule-manager")
+                    yield Static("Chưa tải trạng thái lịch", id="schedule-status", markup=False)
+                with Vertical(id="logs-page"):
+                    yield Static("NHẬT KÝ HOẠT ĐỘNG", classes='panel-title')
+                    yield Static('Nhật ký trong phiên này. Lưu cấu hình không phải xác nhận gửi thành công.', classes='ui-muted')
                     yield RichLog(id="activity", markup=False, wrap=True, auto_scroll=True)
-
+        yield Static("Scheduler: TẮT · cần recurring consent", id="statusbar", markup=False)
         yield Footer()
 
     def on_mount(self) -> None:
         table = self.query_one("#table", DataTable)
-        table.add_columns("✓", "Tên hiển thị (Nickname)", "Phân loại", "Short ID", "Conversation ID")
+        table.add_column("✓", width=3)
+        table.add_column("Tên hiển thị", key="name", width=22)
+        table.add_column("Loại", width=7)
         self.refresh_sessions(initial=True)
         self._initialized = True
         self._activity("🚀 TikTok Streak Manager v0.3 Dashboard đã sẵn sàng.")
+        self.call_after_refresh(self._account_changed)
+        self.call_after_refresh(self._fit_table)
+
+    def _fit_table(self) -> None:
+        table = self.query_one('#table', DataTable)
+        if table.columns:
+            column = next(c for k, c in table.columns.items() if k.value == 'name')
+            column.width = max(10, table.size.width - 18)
+            table.refresh(layout=True)
 
     def _activity(self, text: str) -> None:
         self.query_one("#activity", RichLog).write(text)
@@ -354,15 +231,11 @@ class TikTokTUI(App):
             saved = self._saved_plan()
             preferred = previous if previous in names else saved.get("session", "")
             if preferred not in names:
-                preferred = ""
+                preferred = names[0] if names else ""
             account.set_options(options)
             account.value = preferred if preferred else Select.NULL
             if initial:
-                self.query_one("#message", Input).value = str(saved.get("message", ""))
-                prefs = read_json_object(PREFS_PATH)
-                self.query_one("#send-time", Input).value = str(prefs.get("time", "08:00"))
-                self.query_one("#enable-schedule", Switch).value = False
-                self.query_one("#skip-sent", Switch).value = not bool(read_json_object(CONFIG_PATH).get("allow_repeat_same_day", False))
+                self.query_one("#message", TextArea).load_text(str(saved.get("message", "")))
             self._update_summary()
             if not initial:
                 self.notify(f"Tìm thấy {len(names)} tài khoản đã lưu")
@@ -375,11 +248,23 @@ class TikTokTUI(App):
         except (OSError, ValueError):
             config = {}
         account_name = self._session() or "(Chưa chọn)"
-        targets_count = len(config.get('targets', [])) if isinstance(config.get('targets'), list) else 0
+        targets_count = (len(config.get('targets', [])) if config.get('session') == self._session()
+            and isinstance(config.get('targets'), list) else 0)
         
-        self.query_one("#info", Static).update(
-            f"Tài khoản: {account_name}\nĐã lưu: {targets_count} người nhận | Scheduler TUI: VÔ HIỆU HÓA; lịch qua CLI cần recurring consent."
-        )
+        self.query_one("#statusbar", Static).update(
+            f"{account_name} · Đã lưu: {targets_count} người nhận | Scheduler: TẮT · cần recurring consent")
+        self.query_one('#schedule-overview', Static).update(
+            f"Tài khoản: {account_name} · Đã lưu: {targets_count} người nhận\nScheduler: TẮT · cần recurring consent. TUI không chạy lịch nền.")
+        self.query_one('#schedule-message', Static).update(
+            str(config.get('message', '')) if config.get('session') == self._session() else 'Chưa có nội dung đã lưu cho tài khoản này')
+        saved_ids = matching_selected_ids(config.get('targets', []), self.conversations) if config.get('session') == self._session() else set()
+        saved = (config.get('session') == self._session() and config.get('message', '') == self.query_one('#message', TextArea).text
+            and saved_ids == self.selected_ids and len(config.get('targets', [])) == len(saved_ids)
+            and self.loaded_for == self._session())
+        message_state = self.query_one('#message-state', Static)
+        message_state.update('Đã lưu' if saved else 'Bản nháp · chưa lưu')
+        message_state.set_class(saved, 'saved')
+        message_state.set_class(not saved, 'draft')
 
         visible_count = len(self._visible()) if self.loaded_for == self._session() else 0
         total_count = len(self.conversations) if self.loaded_for == self._session() else 0
@@ -391,6 +276,25 @@ class TikTokTUI(App):
             self.query_one("#inbox-counter", Static).update(
                 f"Đã chọn: {selected_count} | Hiển thị: {visible_count}/{total_count}"
             )
+        notice = self.query_one('#inbox-notice', Static)
+        context = (self._session(), self._generation)
+        failed = self._inbox_error == context
+        notice.set_class(failed, 'error')
+        if not self._session():
+            text = 'Chưa có tài khoản · chọn tài khoản hoặc đăng nhập QR.'
+        elif self._fetching and self._sync_context == context:
+            text = 'Đang tải inbox… Bản nháp được giữ nguyên.'
+        elif failed:
+            text = 'Lỗi đồng bộ · bấm ↻ để thử lại. Bản nháp được giữ nguyên.'
+        elif self.loaded_for != self._session():
+            text = 'Chưa tải inbox · bấm ↻ để làm mới.'
+        elif not total_count:
+            text = 'Inbox rỗng · có thể bấm ↻ để kiểm tra lại.'
+        elif not visible_count:
+            text = 'Không tìm thấy kết quả · đổi từ khóa hoặc bộ lọc.'
+        else:
+            text = 'Chọn người nhận và lưu nội dung trước khi gửi hoặc tạo lịch.'
+        notice.update(text)
 
     def _reset_inbox(self) -> None:
         self.loaded_for = None
@@ -401,19 +305,44 @@ class TikTokTUI(App):
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if self._initialized and event.select.id == "account":
+            self._account_changed()
+        elif self._initialized and event.select.id == 'filter':
+            self._render_table()
+
+    def _account_changed(self) -> None:
+        if self._session() != self._draft_session:
+            self._generation += 1
+            if self._draft_session:
+                self._drafts[self._draft_session] = (self.conversations, set(self.selected_ids),
+                    self.query_one('#message', TextArea).text, self.loaded_for)
             self._reset_inbox()
-            self._activity(f"🔄 Đã chuyển sang tài khoản: {self._session() or '(Không chọn)'}. Vui lòng bấm 'Đồng bộ Inbox'.")
+            session = self._session()
+            self._draft_session = session
+            if session in self._drafts:
+                self.conversations, self.selected_ids, text, self.loaded_for = self._drafts[session]
+            else:
+                saved = self._saved_plan()
+                text = str(saved.get('message', '')) if saved.get('session') == session else ''
+            self.query_one('#message', TextArea).load_text(text)
+            self._render_table()
+            self._activity(f"Đã chọn tài khoản: {session or '(Không chọn)' }.")
+            if session:
+                self.action_sync()
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "search":
             self._render_table()
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
+        if self._initialized:
+            self._update_summary()
 
     def _visible(self) -> list[Conversation]:
         keyword = self.query_one("#search", Input).value.strip().casefold()
-        if not keyword:
-            return self.conversations
-        return [c for c in self.conversations if keyword in c.name.casefold()
-                or keyword in c.conv_id.casefold() or keyword in str(c.conv_short_id)]
+        kind = self.query_one('#filter', Select).value
+        return [c for c in self.conversations
+            if (kind == 'all' or (kind == 'group' and c.conv_type == 2) or (kind == 'direct' and c.conv_type == 1))
+            and (not keyword or keyword in c.name.casefold() or keyword in c.conv_id.casefold()
+                or keyword in str(c.conv_short_id))]
 
     def _render_table(self) -> None:
         table = self.query_one("#table", DataTable)
@@ -423,14 +352,12 @@ class TikTokTUI(App):
         visible = self._visible()
         for c in visible:
             is_selected = c.conv_id in self.selected_ids
-            check_box = "✓ [X]" if is_selected else "  [ ]"
-            conv_kind = "👥 Nhóm" if c.conv_type == 2 else "💬 Cá nhân"
+            check_box = "[x]" if is_selected else "[ ]"
+            conv_kind = "Nhóm" if c.conv_type == 2 else "Cá nhân"
             table.add_row(
-                check_box,
-                c.name,
+                Text(check_box),
+                Text(c.name),
                 conv_kind,
-                str(c.conv_short_id),
-                c.conv_id,
                 key=c.conv_id,
             )
         self._update_summary()
@@ -451,17 +378,26 @@ class TikTokTUI(App):
             self.notify("Vui lòng chọn một tài khoản TikTok trước khi đồng bộ!", severity="warning")
             return
         if self._fetching:
+            self._sync_requested = True
             return
+        self._sync_requested = False
         self._fetching = True
-        self.query_one("#sync", Button).disabled = True
+        generation = self._generation
+        self._sync_context = (session, generation)
+        self._inbox_error = None
+        self._update_summary()
+        previous = [c.target() for c in self.conversations if c.conv_id in self.selected_ids] if self.loaded_for == session else None
+        self.query_one("#refresh", Button).disabled = True
         self._activity(f"⏳ Đang kết nối máy chủ TikTok đồng bộ hội thoại cho '{session}'...")
         try:
             conversations = await asyncio.to_thread(fetch_inbox, session)
-            if session != self._session():
+            if session != self._session() or generation != self._generation:
                 self._activity("Tài khoản đã đổi trong lúc tải; đã hủy kết quả cũ.")
                 return
             config = self._saved_plan()
-            old = config.get("targets", []) if config.get("session") == session else []
+            old = previous if previous is not None else (config.get("targets", []) if config.get("session") == session else [])
+            if self.loaded_for == session:
+                old = [c.target() for c in self.conversations if c.conv_id in self.selected_ids]
             self.conversations = conversations
             self.loaded_for = session
             self.selected_ids = matching_selected_ids(old, conversations)
@@ -469,11 +405,16 @@ class TikTokTUI(App):
             self._activity(f"✅ Đồng bộ thành công: Tìm thấy {len(conversations)} hội thoại (Đã tích chọn lại {len(self.selected_ids)} trước đó).")
             self.notify(f"Đã đồng bộ {len(conversations)} hội thoại!", severity="information")
         except Exception as exc:
+            if session == self._session() and generation == self._generation:
+                self._inbox_error = (session, generation)
             self._activity(f"❌ Không thể đồng bộ inbox: {type(exc).__name__}.")
             self.notify("Đồng bộ thất bại; kiểm tra kết nối mạng hoặc đăng nhập lại!", severity="error")
         finally:
             self._fetching = False
-            self.query_one("#sync", Button).disabled = False
+            self.query_one("#refresh", Button).disabled = False
+            self._update_summary()
+            if self._sync_requested and self.is_running:
+                self.action_sync()
 
     def _save_all(self) -> None:
         session = self._session()
@@ -486,18 +427,19 @@ class TikTokTUI(App):
             self.notify("Vui lòng tích chọn ít nhất 1 người nhận!", severity="warning")
             return
 
-        message = self.query_one("#message", Input).value.strip()
-        if not message:
+        message = self.query_one("#message", TextArea).text
+        if not message.strip():
             self.notify("Vui lòng nhập nội dung tin nhắn!", severity="warning")
             return
 
-        send_time = self.query_one("#send-time", Input).value.strip()
-        skip_if_sent = self.query_one("#skip-sent", Switch).value
-
         try:
-            save_plan(session, message, chosen, allow_repeat_same_day=not skip_if_sent)
-            save_preferences(send_time, False, skip_if_sent=skip_if_sent)
-            self._activity(f"💾 ĐÃ LƯU: {len(chosen)} người nhận | Giờ tham khảo: {send_time} | Scheduler TUI: VÔ HIỆU HÓA; lịch CLI cần recurring consent.")
+            from relttk.application.services import schedule_list
+            from relttk.storage import ledger
+            db = ledger._DEFAULT_LEDGER_PATH
+            if Path(db).exists() and any(r['event']['event_type'] == 'ACTIVATED' for r in schedule_list(session, db_path=db)):
+                raise ValueError('Pause/revoke active grants before editing; authorize a new preview afterwards')
+            save_plan(session, message, chosen)
+            self._activity(f"Đã lưu tin nhắn và {len(chosen)} người nhận; chưa cấp quyền lịch.")
             self.notify(f"Đã lưu {len(chosen)} người nhận và cấu hình; chưa kích hoạt lịch CLI.", severity="information")
             self._update_summary()
         except (ValueError, OSError) as exc:
@@ -506,7 +448,7 @@ class TikTokTUI(App):
 
     def _launch_terminal(self, *args: str) -> None:
         if os.name != "nt":
-            self.notify("Chỉ mở terminal riêng tự động trên Windows", severity="warning")
+            self.notify("Đóng TUI và chạy python -B main.py login trong terminal này; mở lại sau đăng nhập.", severity="information")
             return
         try:
             subprocess.Popen(
@@ -545,9 +487,31 @@ class TikTokTUI(App):
 
     def action_refresh(self) -> None:
         self.refresh_sessions()
+        self._refresh_schedule_status()
+        self._update_summary()
+        self._activity('Đang làm mới toàn bộ; giữ tin nhắn và lựa chọn chưa lưu.')
+        if self._session():
+            self.action_sync()
+
+    def _refresh_schedule_status(self) -> None:
+        try:
+            from relttk.application.services import schedule_list
+            from relttk.application.schedule_ui import STATE_LABELS
+            from relttk.storage import ledger
+            rows = schedule_list(self._session(), db_path=ledger._DEFAULT_LEDGER_PATH) if self._session() else []
+            text = '\n'.join(r['consent']['schedule_id']+' · '+STATE_LABELS.get(r['event']['event_type'], r['event']['event_type']) for r in rows)
+            self.query_one('#schedule-status', Static).update(text or 'Chưa có lịch đã cấp quyền.')
+        except Exception as exc:
+            self.query_one('#schedule-status', Static).update('Không tải được trạng thái lịch: '+type(exc).__name__)
+            self._activity('Làm mới trạng thái lịch thất bại: '+type(exc).__name__)
+
 
     def action_sync(self) -> None:
-        asyncio.create_task(self._sync_inbox())
+        self.run_worker(self._sync_inbox(), group='inbox')
+
+    def action_settings(self) -> None:
+        from relttk.application.settings_ui import SendSettingsScreen
+        self.push_screen(SendSettingsScreen(), self._settings_saved)
 
     @work(thread=True, group="send")
     def _run_send(self, source: str) -> None:
@@ -583,11 +547,11 @@ class TikTokTUI(App):
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         action = event.button.id
         if action == "refresh":
-            self.refresh_sessions()
+            self.action_refresh()
         elif action == "login":
             self._launch_terminal("login")
         elif action == "sync":
-            await self._sync_inbox()
+            self.action_sync()
         elif action == "dryrun":
             await self._dryrun()
         elif action == "select-visible":
@@ -599,10 +563,35 @@ class TikTokTUI(App):
             self._render_table()
         elif action == "save-all":
             self._save_all()
+        elif action == 'schedule-manager':
+            from relttk.application.schedule_ui import ScheduleScreen
+            self.push_screen(ScheduleScreen(self._session(), lambda: (self._session(), self._generation)),
+                lambda _: self._refresh_schedule_status())
+        elif action == 'settings-open':
+            self.action_settings()
+        elif action in ('nav-conversations', 'nav-schedule', 'nav-logs'):
+            page = {'nav-conversations':'conversations-page', 'nav-schedule':'schedule-page', 'nav-logs':'logs-page'}[action]
+            self.query_one('#pages', ContentSwitcher).current = page
+            for button in self.query('#navigation Button'):
+                button.variant = 'primary' if button.id == action else 'default'
+            if action == 'nav-schedule':
+                self._update_summary()
+                self._refresh_schedule_status()
         elif action == "send-now":
-            self._activity("⚡ [Thủ công] Bạn đã bấm 'Gửi ngay bây giờ'. Đang khởi tạo kết nối WebSocket gửi tin...")
-            self.notify("Bắt đầu tiến trình gửi tin...", severity="information")
-            self._run_send("Thủ công")
+            saved = self._saved_plan()
+            chosen = [c.target() for c in self.conversations if c.conv_id in self.selected_ids]
+            if (saved.get('session') != self._session() or saved.get('message') != self.query_one('#message', TextArea).text
+                    or sorted(chosen, key=lambda t:t['conv_id']) != sorted(saved.get('targets', []), key=lambda t:t['conv_id'])):
+                self.notify('Lưu tin và người nhận trước khi gửi.', severity='warning')
+            elif not chosen:
+                self.notify('Chọn ít nhất một người nhận.', severity='warning')
+            else:
+                self.push_screen(SendNowReview(saved))
+
+    def _settings_saved(self, settings) -> None:
+        if settings is not None:
+            self._update_summary()
+            self.notify('Đã lưu giới hạn gửi; chưa kích hoạt lịch hay gửi tin.')
 
 
 if __name__ == "__main__":

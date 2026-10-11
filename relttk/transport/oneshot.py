@@ -44,7 +44,8 @@ def validate_against_server_inbox(cookies: dict, targets: list[dict], device_id:
     match the server-reported metadata before any send attempt.
     """
     _log.info("oneshot", "Validating targets against server conversation inbox...")
-    inbox_convs = get_conversations(cookies=cookies, device_id=device_id)
+    from relttk.transport.bounded_inbox import fetch
+    inbox_convs = fetch(cookies, device_id)
     server_map = {c["conv_id"]: c for c in inbox_convs}
 
     for t in targets:
@@ -302,6 +303,8 @@ async def _open_ws(cookies: dict, ws_url: str):
             ssl=ssl_ctx,
             ping_interval=20,
             ping_timeout=10,
+            open_timeout=15,
+            close_timeout=5,
         )
     except InvalidStatus as e:
         for line in describe_ws_rejection(e, ws_url, headers, cookies):
@@ -480,7 +483,7 @@ async def run_oneshot_send(
                     effective_device_id = ws_auth.get('device_id') if ws_auth else config.DEVICE_ID
                     stage = 'inbox'
                     if validate_server:
-                        validate_against_server_inbox(cookies, targets, device_id=effective_device_id)
+                        await asyncio.to_thread(validate_against_server_inbox, cookies, targets, device_id=effective_device_id)
                     stage = 'handshake'
                     connection = await _open_ws(*_prepare_ws(cookies, session_name, ws_auth))
                     await asyncio.wait_for(connection.send('hi'), timeout=5.0)

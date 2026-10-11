@@ -305,7 +305,7 @@ def cmd_login() -> int:
 
 
 def cmd_capture_ws_auth(session_name: str) -> int:
-    """Explicit Windows browser setup; a handshake probe never sends a DM."""
+    """Explicit optional browser setup; a handshake probe never sends a DM."""
     try:
         from relttk.transport.ws_auth_capture import capture_session_auth
         capture_session_auth(session_name)
@@ -658,6 +658,7 @@ def cmd_worker_admin(args):
 def cmd_schedule_admin(args):
     import asyncio
     import signal
+    from relttk.application.terminal import read as input, write as print
     from relttk.application import services
     from relttk.storage import ledger
     try:
@@ -742,6 +743,7 @@ def main() -> int:
     )
 
     subparsers = parser.add_subparsers(dest="command", help="Additional commands")
+    subparsers.add_parser('browser-preflight', help='Local optional Chromium check; no credentials, launch or network')
     ready = subparsers.add_parser('runtime-preflight', help='Non-mutating local runtime readiness; no network')
     ready.add_argument('--runtime-dir', required=True)
     ready.add_argument('--db', required=True)
@@ -865,7 +867,7 @@ def main() -> int:
     probe_parser.add_argument("--host", help="Override WS host, e.g. im-ws-sg.tiktok.com (im-ws*.tiktok.com only)")
 
     subparsers.add_parser("tui", help="Launch the Textual Terminal User Interface")
-    capture_parser = subparsers.add_parser("capture-ws-auth", help="Windows-only browser auth setup for a saved session")
+    capture_parser = subparsers.add_parser("capture-ws-auth", help="Explicit Windows/Debian browser auth setup for a saved session")
     capture_parser.add_argument("--session", "-s", required=True)
 
     args = parser.parse_args()
@@ -892,6 +894,11 @@ def main() -> int:
             operations.note(result)
             print(json.dumps(result))
             return 3
+    if args.command == 'browser-preflight':
+        from relttk.transport.ws_auth_capture import browser_preflight
+        result = browser_preflight()
+        print(json.dumps(result, ensure_ascii=True))
+        return 0 if result['state'] == 'LOCAL_READY' else 3
     if args.command in ('runtime-preflight', 'identity-verify'):
         return cmd_readiness_admin(args)
     if args.command and args.command.startswith('schedule-'):

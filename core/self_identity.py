@@ -5,16 +5,15 @@ provenance. A generic odinId anywhere in HTML cannot establish the logged-in
 account. Do not add an acceptance rule without separately reviewed evidence.
 """
 import json
-from multiprocessing import context
 import re
 from html import unescape
 from relttk.identity.circuit_breaker import ProtocolFailure
 
 
 def verify_authenticated_self(html):
-    # Accept only the reviewed TikTok app-context schema.
-    # The caller must separately establish credential consistency.
-    return extract_self_uid_candidate(html)
+    # A matching candidate (even in two cookie contexts) is not an authority.
+    # No reviewed authenticated-self protocol evidence is available in source.
+    raise ProtocolFailure("AUTHENTICATED_SELF_CONTRACT_UNVERIFIED")
 
 def extract_self_uid_candidate(html: str) -> str:
     matches = re.findall(
@@ -50,7 +49,7 @@ def extract_self_uid_candidate(html: str) -> str:
 
     if (
         not isinstance(uid, str)
-        or not uid.isdecimal()
+        or not re.fullmatch(r"[1-9][0-9]{0,19}", uid)
         or int(uid) <= 0
     ):
         raise ProtocolFailure("SELF_UID_INVALID")

@@ -305,7 +305,7 @@ class IdentityCacheTests(unittest.TestCase):
                         with self.assertRaises(cb.ProtocolFailure):
                             api.get_own_user_id({'sessionid':'fixture'},use_cache=False)
                     opened.assert_not_called()
-                    transport.assert_called_once()
+                    transport.assert_not_called()
 
     def test_default_cache_behavior_still_works_with_fixture(self):
         from core import api

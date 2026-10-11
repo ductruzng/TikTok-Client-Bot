@@ -46,8 +46,54 @@ def schedule_authorize(review, reason, *, db_path):
 
 
 def schedule_status(grant_id, *, db_path):
-    from relttk.runtime.scheduling import status
-    return status(grant_id, db_path=db_path)
+    from relttk.runtime import scheduling
+    result = scheduling.status(grant_id, db_path=db_path)
+    with scheduling.readonly(db_path) as conn:
+        uid = result['consent']['uid']
+        cfg = result['consent']['policy']
+        from relttk.storage import ledger, ledger_requests as requests, queue_service as queue
+        result['recipients'] = []
+        for target in result['consent']['policy']['targets']:
+            rows = [dict(row) for row in conn.execute(
+                'SELECT request_id,status,transmitted,date,reason_code,server_msg_id FROM send_requests WHERE canonical_uid=? AND conv_id=? ORDER BY rowid DESC LIMIT 50',
+                (uid, target['conv_id']))]
+            admission = []
+            for pending in conn.execute("SELECT * FROM send_requests WHERE canonical_uid=? AND conv_id=? AND status='queued' ORDER BY rowid", (uid, target['conv_id'])):
+                try:
+                    queue.check_fifo(conn, pending)
+                    requests.check_admission(conn, pending, requests.settings_from_config(cfg), rotation_config=cfg,
+                        session_name=cfg['session'], policy_reference=result['consent']['policy_reference'], policy_config=cfg)
+                except ledger.LedgerError as exc:
+                    admission.append(exc.result() if hasattr(exc, 'result') else {'request_id':pending['request_id'], 'reason':getattr(exc,'code',type(exc).__name__)})
+            result['recipients'].append({'target': target, 'requests': rows, 'admission_holds':admission,
+                'success_definition': 'Correlated server echo; receipt/read/streak unverified'})
+    return result
+
+
+def schedule_list(session, *, db_path):
+    """Explicit read-only UI action; no database creation or credential access."""
+    from relttk.runtime import scheduling
+    with scheduling.readonly(db_path) as conn:
+        return [scheduling._state(conn, row['grant_id']) for row in
+                conn.execute('SELECT grant_id FROM recurring_grants ORDER BY created_at_ms')
+                if scheduling._load(conn, row['grant_id'])[0]['session'] == session]
+
+
+def schedule_action_challenge(action, review):
+    if action == 'AUTHORIZE':
+        return 'AUTHORIZE ' + review['fingerprint']
+    if action not in ('ACTIVATED', 'PAUSED', 'REVOKED'):
+        raise ValueError('UNSUPPORTED_SCHEDULE_ACTION')
+    verb = {'ACTIVATED': 'ACTIVATE', 'PAUSED': 'PAUSE', 'REVOKED': 'REVOKE'}[action]
+    return f"{verb} {review['grant_id']} {review['fingerprint']} {review['event']['version']}"
+
+
+def schedule_confirm(action, review, reason, challenge, *, db_path):
+    if challenge != schedule_action_challenge(action, review):
+        raise ValueError('CONFIRMATION_MISMATCH')
+    if action == 'AUTHORIZE':
+        return schedule_authorize(review, reason, db_path=db_path)
+    return schedule_change(review['grant_id'], review, action, reason, db_path=db_path)
 
 
 def schedule_change(grant_id, preview, action, reason, *, db_path):
@@ -172,7 +218,7 @@ def parse_inbox(raw: object) -> list[Conversation]:
         seen.add(conv_id)
         name = item.get("name")
         if not isinstance(name, str) or not name.strip():
-            name = "(ChÃƒâ€ Ã‚Â°a cÃƒÆ’Ã‚Â³ tÃƒÆ’Ã‚Âªn)"
+            name = "(Chưa có tên)"
         name = " ".join(name.split())[:100]
         output.append(Conversation(conv_id, short_id, conv_type, name))
     return output
@@ -190,7 +236,8 @@ def fetch_inbox(session_name: str) -> list[Conversation]:
     cookies = qrlogin.load_session(session_name)
     if not isinstance(cookies, dict) or not cookies.get("sessionid"):
         raise ValueError("Session is missing sessionid; log in again")
-    response = api.get_conversations(cookies=cookies, device_id=config.DEVICE_ID)
+    from relttk.transport.bounded_inbox import fetch
+    response = fetch(cookies, config.DEVICE_ID)
     return parse_inbox(response)
 
 
@@ -235,7 +282,7 @@ def save_plan(
         raise ValueError('Rotation plan is managed through CLI/config; TUI cannot overwrite templates')
     current.update({
         "session": session,
-        "message": message.strip(),
+        "message": message,
         "targets": [c.target() for c in recipients],
     })
     if allow_repeat_same_day is not None:

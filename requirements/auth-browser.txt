@@ -1,0 +1,3 @@
+# Explicit optional browser authentication, Windows and Debian. No cookie extractor.
+# Owner installs Chromium separately: python -m playwright install chromium
+playwright>=1.63,<2

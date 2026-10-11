@@ -60,7 +60,7 @@ class TUIServiceTests(unittest.TestCase):
             target=Conversation('0:1:10:20', 999, 1, 'Friend')
             obj=save_plan('account',' hello ',[target],path)
             self.assertEqual(obj['note'],'keep')
-            self.assertEqual(obj['message'],'hello')
+            self.assertEqual(obj['message'],' hello ')
             self.assertEqual(obj['targets'],[target.target()])
             self.assertEqual(read_json_object(path),obj)
 

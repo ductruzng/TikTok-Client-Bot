@@ -10,7 +10,8 @@ not been established; real bootstrap and managed sending fail closed. Offline
 Phase4 acceptance does not authorize live sending, production migration or deployment.
 
 **Debian 13 is the only current staging target.** Termux/Android is retired.
-The existing optional Windows setup/UI modules remain for compatibility.
+Optional setup/TUI supports Windows and Debian; native browser and terminal
+acceptance still needs Owner testing.
 
 ## Offline dry-run
 
@@ -81,7 +82,9 @@ results, import contracts, rollback evidence and Debian staging blockers.
 
 Optional dependencies are installed explicitly when needed, for example
 `python -m pip install -r requirements/tui.txt` for the full UI test fixture.
-Windows-only auth/cookie extras remain separate; they are not Debian requirements.
+Browser authentication is an explicit optional dependency in
+`requirements/auth-browser.txt`; `requirements/auth-windows.txt` is a compatibility
+include. Windows cookie extraction remains separate from Debian requirements.
 The former root manual filenames have moved: import the Windows cookie helper as
 `from tools import browsercookies`. Browser diagnostics use
 `python -B tools/test_ws_capture.py` only with separate live authorization;
@@ -94,6 +97,8 @@ unchanged. See [root hygiene evidence](docs/phases/PHASE5E.md).
 - [Sending safety and limits](#sending-safety-and-limits)
 - [Guarded offline checks](#dependencies-and-guarded-checks)
 - [Debian operations and backup](docs/operations/DEPLOY_DEBIAN.md)
+- [H0–H5 changes and combined Debian test](docs/operations/HARDENING_H0_H5.md)
+- [TUI automatic inbox, time input and F2 send settings](docs/operations/TUI_USABILITY.md)
 - [Owner-operated Debian fixture checklist](docs/operations/PHASE4D_OWNER_CHECKLIST.md)
 - [Current security regression evidence](docs/evidence/EVIDENCE_PHASE4_SECURITY.md)
 - [Cleanup audit and approval plan](docs/phases/PHASE5_REPO_CLEANUP_PLAN.md)
@@ -128,8 +133,9 @@ capability tests. The [evidence record](docs/evidence/EVIDENCE_PHASE4_SECURITY.m
 contains the original result/provenance. The full baseline includes optional
 Textual UI coverage; a core-only environment with additional UI skips is not
 an equivalent result. `requirements/tui.txt` is available for the disposable
-full-test fixture. Windows auth/cookie extras are in
-`requirements/auth-windows.txt` and `requirements/windows.txt`.
+full-test fixture. Browser-auth extras are in `requirements/auth-browser.txt`;
+Windows cookie extras are in `requirements/windows.txt`. Install neither for
+ordinary guarded core tests.
 
 For Debian core-only installation, Textual is still optional. Install
 `requirements/tui.txt` in the disposable full-test venv before claiming the full

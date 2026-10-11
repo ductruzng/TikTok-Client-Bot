@@ -57,7 +57,7 @@ def verify(session, *, db_path):
         if failure:
             cb.record_failure(failure, db_path=db_path, session=session)
         raise
-    if not isinstance(uid, str) or not uid.isdecimal() or int(uid) <= 0:
+    if not isinstance(uid, str) or not __import__('re').fullmatch(r'[1-9][0-9]{0,19}', uid):
         raise cb.ProtocolFailure('INVALID_SELF_UID')
     with closing(readiness.open_quiescent(db_path)) as conn:
         conn.row_factory = __import__('sqlite3').Row

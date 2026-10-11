@@ -44,12 +44,9 @@ class CookieConsistencyTests(unittest.TestCase):
             "urlopen",
             side_effect=[response("111"), response("111")],
         ) as request:
-            uid = api.get_own_user_id(
-                {"sessionid": "synthetic"},
-                use_cache=False,
-            )
-        self.assertEqual(uid, "111")
-        self.assertEqual(request.call_count, 2)
+            with self.assertRaisesRegex(ProtocolFailure, 'CONTRACT_UNVERIFIED'):
+                api.get_own_user_id({"sessionid": "synthetic"}, use_cache=False)
+        request.assert_not_called()
 
     def test_conflicting_responses(self):
         with patch.object(

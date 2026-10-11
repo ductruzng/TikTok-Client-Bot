@@ -42,15 +42,18 @@ TIKTOK_RUNTIME_DIR=/var/lib/relttk /opt/relttk/releases/RELEASE/venv/bin/python 
 ```
 
 Output directory must exist privately; files must be new. Renderer accepts one
-recipient, daily_budget=1, max_wait<=300, window>=10 minutes and at least ten
-minutes before local midnight. Multi-recipient grants are refused, not shortened.
+recipient with daily_budget=1, window>=10 minutes and ten minutes before midnight,
+or two recipients with daily_budget=2, window>=15 minutes and fifteen minutes
+before midnight. Both require max_wait<=300. For two recipients, cooldown must
+fit max_wait and max_sends_per_window must allow at least two. Unsupported grants
+are refused, not shortened. See [H0–H5 report](HARDENING_H0_H5.md).
 Paths must be absolute ASCII without whitespace/control, quotes, backslash,
 percent, dollar or traversal. No shell or systemd specifier expansion is accepted.
 Grant selector, policy, binding/circuit versions and expiry are checked read-only.
 Rendering does not attest authenticated identity or host delivery.
 
 Units use fixed real release paths, relttk user, private runtime, restricted
-writable paths, Type=oneshot, Restart=no, startup600s, stop90s. Timer checks every
+writable paths, Type=oneshot, Restart=no, startup600s (one) / 900s (two), stop90s. Timer checks every
 minute in Asia/Ho_Chi_Minh with Persistent=false. It does not catch up old dates;
 only existing current-window authority can enqueue/claim. A terminal manifest
 is never replaced. Timer repetition is not UNKNOWN retry permission.
@@ -90,9 +93,12 @@ or automatic reset/retry is configured.
 SIGTERM sets existing stop event; a marker already committed receives bounded
 echo handling before return. Forced kill/power loss keeps marker and recovers
 UNKNOWN under the existing RunLock on the next authorized run; no quota refund,
-rotation advance, UNKNOWN resend or grant recreation. 600s is a process watchdog,
-not a proven upper bound on all live HTTP pagination; Linux validation is still
-required. If the workload/grace cannot be supported, refuse activation.
+rotation advance, UNKNOWN resend or grant recreation. Inbox HTTP and profile
+enrichment now have a 45-second subprocess deadline plus bounded reap; WebSocket
+open/close are bounded. Host process launch, filesystem/SQLite stalls and native
+termination remain subject to the watchdog and need Linux fixture validation.
+Identity currently refuses before HTTP, so this is not live-send certification.
+If the workload/grace cannot be supported, refuse activation.
 
 ## Explicit backup; never automatically restore
 

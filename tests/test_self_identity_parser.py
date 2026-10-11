@@ -57,11 +57,9 @@ class SelfIdentityParserTests(unittest.TestCase):
         with self.assertRaises(ProtocolFailure):
             extract_self_uid_candidate(content + content)
 
-    def test_verified_parser_accepts_consistent_data(self):
-        self.assertEqual(
-            verify_authenticated_self(make_html("123456789")),
-            "123456789",
-        )
+    def test_consistent_candidate_is_not_verified_identity(self):
+        with self.assertRaisesRegex(ProtocolFailure, 'CONTRACT_UNVERIFIED'):
+            verify_authenticated_self(make_html("123456789"))
 
 
 if __name__ == "__main__":

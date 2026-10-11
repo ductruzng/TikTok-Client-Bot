@@ -1,3 +1,2 @@
-# Optional Windows browser auth setup; not a native Termux dependency.
-# Install browser separately: python -m playwright install chromium
-playwright>=1.63,<2; sys_platform == "win32"
+# Compatibility include; browser setup is now explicit on Windows and Debian.
+-r auth-browser.txt
