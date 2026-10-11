@@ -175,3 +175,18 @@ Debian/systemd/live verification is separate. WAL backup requires Python's
 SQLite no-checkpoint-on-close capability. Rendering supports one recipient per
 grant and rejects unsupported workloads.
 
+## WebSocket credential removal
+
+The embedded upstream WebSocket access key and implicit fallback have been
+removed. URL construction requires an explicit, valid browser-issued key and
+matching ttwid; authentication parameters in base URLs or extra configuration
+are rejected. Managed sending continues to load the pair bound to the selected
+session. This does not establish the Identity Contract or authorize live use.
+
+Previously published Git history or existing clones may still contain the old
+literal. Treat it as potentially exposed credential material: the credential
+owner should revoke/rotate it if possible. History cleanup requires a separately
+approved, coordinated operation covering branches, tags and downstream clones;
+no history rewrite was performed. Ignore rules do not remove already tracked
+credentials or historical content.
+

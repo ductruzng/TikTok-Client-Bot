@@ -95,12 +95,21 @@ def build_ws_url(cookies: dict, base_url: str | None = None, access_key: str | N
     one issued for that ttwid, otherwise the gateway rejects with "authentication failed".
     """
     import urllib.parse
-    url = base_url or config.WS_URL
-    params = [("access_key", access_key or config.WS_ACCESS_KEY), ("fpid", config.WS_FPID), ("aid", config.WS_AID)]
+    if not isinstance(access_key, str) or not _RE_ACCESS_KEY.fullmatch(access_key):
+        raise ValueError("Explicit browser-issued 32-hex WS access key required")
     ttwid = (cookies or {}).get("ttwid")
-    if ttwid:
-        params.append(("ttwid", urllib.parse.quote(urllib.parse.unquote(ttwid), safe="|")))
-    query = "&".join(f"{k}={v}" for k, v in params if f"{k}=" not in url)
+    if not isinstance(ttwid, str) or not _RE_TTWID.fullmatch(urllib.parse.unquote(ttwid)):
+        raise ValueError("Matching browser-issued WS ttwid required")
+    url = base_url or config.WS_URL
+    # Auth must come exclusively from the explicit pair, never URL/config parameters.
+    for query in (urllib.parse.urlsplit(url).query, config.WS_EXTRA_PARAMS):
+        if any(k.lower() in ("access_key", "ttwid")
+               for k, _ in urllib.parse.parse_qsl(query, keep_blank_values=True)):
+            raise ValueError("WS URL/config must not contain authentication parameters")
+    params = [("access_key", access_key), ("fpid", config.WS_FPID), ("aid", config.WS_AID),
+              ("ttwid", urllib.parse.quote(urllib.parse.unquote(ttwid), safe="|"))]
+    query = "&".join(f"{k}={v}" for k, v in params
+                     if k in ("access_key", "ttwid") or f"{k}=" not in url)
     if config.WS_EXTRA_PARAMS:
         query += "&" + config.WS_EXTRA_PARAMS
     return url + ("&" if "?" in url else "?") + query

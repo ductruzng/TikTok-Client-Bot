@@ -11,8 +11,6 @@ WS_URL = (
 WS_EXTRA_PARAMS = "xsack=1&xaack=1&xsqos=0"
 WS_FPID = "9"
 WS_AID = "1459"
-# Upstream default; only valid together with the upstream author's ttwid
-WS_ACCESS_KEY = "277f7a051d7a540326780c413dbc2b9c"
 WS_AUTH_FILE = os.environ.get(
     "TIKTOK_WS_AUTH_FILE",
     "ws_auth.local.json"

@@ -26,7 +26,7 @@ from core.proto import f_str, f_varint, f_bytes
 class IndependentReview(unittest.TestCase):
     def setUp(self):
         # Never pick up a real browser ttwid/access_key from the developer's ws_auth.local.json
-        p = patch.object(oneshot, "load_ws_auth", return_value={"ttwid": "1|fake-secret-ttwid", "access_key": "c" * 32})
+        p = patch.object(oneshot, "load_ws_auth", return_value={"ttwid": "1|fake-secret-ttwid|1|aa", "access_key": "c" * 32})
         p.start()
         self.addCleanup(p.stop)
 
@@ -59,8 +59,6 @@ class IndependentReview(unittest.TestCase):
         )
         self.assertNotIn("fake-sid", url)
         self.assertNotIn("fake_tok", url)
-        self.assertIn("access_key=277f7a051d7a540326780c413dbc2b9c", build_ws_url({}))
-        self.assertNotIn("ttwid=", build_ws_url({}))
 
     def test_ws_auth_file_pair_is_validated_and_overrides_session_ttwid(self):
         from client import apply_ws_auth, load_ws_auth
