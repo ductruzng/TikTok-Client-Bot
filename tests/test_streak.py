@@ -1,3 +1,4 @@
+from ledger_fixtures import fixture_create, fixture_start, fixture_send
 import asyncio
 import concurrent.futures
 import json
@@ -18,10 +19,12 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 import ledger
+from ledger_fixtures import reserve_at, initialize_fixture
 import log
 from core.proto import _build_msg_body, build_ws_packet, f_varint, f_str, f_bytes, encode_varint
 from client import LttkClient
-from oneshot import validate_config_data, _send_target_oneshot
+from oneshot import validate_config_data
+from ledger_fixtures import fixture_send as _send_target_oneshot
 
 
 class TestCliDryRun(unittest.TestCase):
@@ -180,6 +183,7 @@ class TestPersistentLedgerDedupe(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp(prefix="test_ledger_")
         self.db_path = os.path.join(self.temp_dir, "test_ledger.db")
+        initialize_fixture(self.db_path)
 
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
@@ -202,22 +206,28 @@ class TestPersistentLedgerDedupe(unittest.TestCase):
         uuid1 = "uuid-claim-1"
 
         # First reservation claims status pending
-        res_date = ledger.reserve_pending(uid, cid, uuid1, date=date, db_path=self.db_path)
+        res_date = reserve_at(uid, cid, uuid1, date=date, db_path=self.db_path)
         self.assertEqual(res_date, date)
 
         # Second reservation on same day must raise QuotaExceededError
         with self.assertRaises(ledger.QuotaExceededError):
-            ledger.reserve_pending(uid, cid, "uuid-claim-2", date=date, db_path=self.db_path)
+            reserve_at(uid, cid, "uuid-claim-2", date=date, db_path=self.db_path)
 
-        # Different conversation on same day succeeds
-        res2 = ledger.reserve_pending(uid, "conv_888", "uuid-claim-3", date=date, db_path=self.db_path)
-        self.assertEqual(res2, date)
-
-        # Confirm previous reservation before testing next date reservation
+        # V2 concurrency=1: a second conversation waits for the active transmission.
+        with self.assertRaises(ledger.QuotaExceededError):
+            reserve_at(uid, "conv_888", "uuid-blocked", date=date, db_path=self.db_path)
         ledger.confirm_send(uid, cid, date, uuid1, server_msg_id="10001", confirm_date=date, db_path=self.db_path)
+        # 3D preserves blocked queued requests; explicitly retire them before a new key.
+        import queue_service, ledger_requests
+        for row in queue_service.list_queue(db_path=self.db_path):
+            if row['status'] == 'queued':
+                ledger_requests.cancel_request(row['request_id'], 'retire blocked fixture request', db_path=self.db_path)
+        res2 = reserve_at(uid, "conv_888", "uuid-claim-3", date=date, db_path=self.db_path)
+        self.assertEqual(res2, date)
+        ledger.confirm_send(uid, "conv_888", date, "uuid-claim-3", server_msg_id="10002", confirm_date=date, db_path=self.db_path)
 
         # Different date on same conversation succeeds
-        res3 = ledger.reserve_pending(uid, cid, "uuid-claim-4", date="2026-10-09", db_path=self.db_path)
+        res3 = reserve_at(uid, cid, "uuid-claim-4", date="2026-10-09", db_path=self.db_path)
         self.assertEqual(res3, "2026-10-09")
 
     def test_persistent_dedupe_across_restart(self):
@@ -225,7 +235,7 @@ class TestPersistentLedgerDedupe(unittest.TestCase):
         cid = "conv_999"
         date = "2026-10-08"
 
-        ledger.reserve_pending(uid, cid, "uuid-1", date=date, db_path=self.db_path)
+        reserve_at(uid, cid, "uuid-1", date=date, db_path=self.db_path)
 
         # Simulate complete process restart by querying fresh connection
         attempted, status = ledger.is_already_attempted(uid, cid, date=date, db_path=self.db_path)
@@ -234,7 +244,7 @@ class TestPersistentLedgerDedupe(unittest.TestCase):
 
         # Quota remains blocked
         with self.assertRaises(ledger.QuotaExceededError):
-            ledger.reserve_pending(uid, cid, "uuid-2", date=date, db_path=self.db_path)
+            reserve_at(uid, cid, "uuid-2", date=date, db_path=self.db_path)
 
     def test_concurrent_reservation_claims(self):
         uid = "user_concurrent"
@@ -246,12 +256,12 @@ class TestPersistentLedgerDedupe(unittest.TestCase):
 
         def _claim_worker(idx):
             try:
-                ledger.reserve_pending(uid, cid, f"uuid-worker-{idx}", date=date, db_path=self.db_path)
+                reserve_at(uid, cid, f"uuid-worker-{idx}", date=date, db_path=self.db_path)
                 return "success"
-            except ledger.QuotaExceededError:
+            except ledger.LedgerError:
                 return "quota_exceeded"
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+        with patch("ledger_requests.utc_now_ms", return_value=1791435600000), concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
             futures = [ex.submit(_claim_worker, i) for i in range(8)]
             for f in concurrent.futures.as_completed(futures):
                 res = f.result()
@@ -274,7 +284,7 @@ class TestPersistentLedgerDedupe(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.dirname(missing_db)))
 
         # On existing DB, readonly connection rejects writes
-        ledger.reserve_pending("uid", "cid", "uuid-1", date="2026-10-08", db_path=self.db_path)
+        reserve_at("uid", "cid", "uuid-1", date="2026-10-08", db_path=self.db_path)
         ro_conn = ledger._get_readonly_connection(self.db_path)
         self.assertIsNotNone(ro_conn)
         try:
@@ -290,6 +300,7 @@ class TestLedgerConfirmAndFailure(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp(prefix="test_ledger2_")
         self.db_path = os.path.join(self.temp_dir, "test_ledger.db")
+        initialize_fixture(self.db_path)
         self.lock_path = os.path.join(self.temp_dir, "run.lock")
 
     def tearDown(self):
@@ -306,7 +317,7 @@ class TestLedgerConfirmAndFailure(unittest.TestCase):
             ledger.confirm_send(uid, cid, date, client_uuid, server_msg_id="10001", db_path=self.db_path)
 
         # Reserve
-        ledger.reserve_pending(uid, cid, client_uuid, date=date, db_path=self.db_path)
+        reserve_at(uid, cid, client_uuid, date=date, db_path=self.db_path)
 
         # UUID mismatch rejected
         with self.assertRaises(ledger.LedgerError):
@@ -332,7 +343,7 @@ class TestLedgerConfirmAndFailure(unittest.TestCase):
         confirm_date = "2026-10-09"
         client_uuid = "uuid-cross"
 
-        ledger.reserve_pending(uid, cid, client_uuid, date=send_date, db_path=self.db_path)
+        reserve_at(uid, cid, client_uuid, date=send_date, db_path=self.db_path)
         ledger.confirm_send(
             uid, cid, send_date, client_uuid, server_msg_id="999",
             confirm_date=confirm_date, db_path=self.db_path
@@ -352,7 +363,7 @@ class TestLedgerConfirmAndFailure(unittest.TestCase):
         date = "2026-10-08"
         client_uuid = "uuid-fail"
 
-        ledger.reserve_pending(uid, cid, client_uuid, date=date, db_path=self.db_path)
+        reserve_at(uid, cid, client_uuid, date=date, db_path=self.db_path)
         ledger.mark_failed_unknown(uid, cid, date, client_uuid, reason_code=ledger.REASON_TIMEOUT, db_path=self.db_path)
 
         # Status is failed_unknown
@@ -361,13 +372,13 @@ class TestLedgerConfirmAndFailure(unittest.TestCase):
 
         # No retry allowed today
         with self.assertRaises(ledger.QuotaExceededError):
-            ledger.reserve_pending(uid, cid, "uuid-retry", date=date, db_path=self.db_path)
+            reserve_at(uid, cid, "uuid-retry", date=date, db_path=self.db_path)
 
         # Now test that confirmed record cannot be overwritten by failure
         uid2 = "user_ok"
         cid2 = "conv_ok"
         uuid2 = "uuid-ok"
-        ledger.reserve_pending(uid2, cid2, uuid2, date=date, db_path=self.db_path)
+        reserve_at(uid2, cid2, uuid2, date=date, db_path=self.db_path)
         ledger.confirm_send(uid2, cid2, date, uuid2, server_msg_id="111", db_path=self.db_path)
 
         ledger.mark_failed_unknown(uid2, cid2, date, uuid2, reason_code=ledger.REASON_DISCONNECTED, db_path=self.db_path)
@@ -634,6 +645,9 @@ class MockWebSocket:
             raise frame
         return frame
 
+    async def close(self):
+        pass
+
 
 def _build_synthetic_echo_frame(
     conv_id: str,
@@ -668,6 +682,7 @@ class TestFakeWebSocketScenarios(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp(prefix="test_fake_ws_")
         self.db_path = os.path.join(self.temp_dir, "test_ledger.db")
+        initialize_fixture(self.db_path)
         self.target = {
             "conv_id": "0:1:111:222",
             "conv_short_id": 7300000001,
@@ -737,6 +752,7 @@ class TestFakeWebSocketScenarios(unittest.IsolatedAsyncioTestCase):
 
         # Clear DB for Case B
         os.remove(self.db_path)
+        initialize_fixture(self.db_path)
 
         # Case B: Wrong UUID (incoming UUID doesn't match client_msg_id)
         wrong_uuid = _build_synthetic_echo_frame(
@@ -765,6 +781,7 @@ class TestFakeWebSocketScenarios(unittest.IsolatedAsyncioTestCase):
 
         # Send error
         os.remove(self.db_path)
+        initialize_fixture(self.db_path)
         ws_error = MockWebSocket(send_exc=ConnectionResetError("Socket broken"))
         with patch("uuid.uuid4", return_value=self.fixed_uuid):
             res2 = await _send_target_oneshot(
@@ -810,7 +827,7 @@ class TestFakeWebSocketScenarios(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(res["status"], ledger.STATUS_FAILED_UNKNOWN)
 
     async def test_fake_ws_compressed_errors(self):
-        """Decompressed LZ4 restriction/ban frames abort correlation and mark failed_unknown."""
+        """Unverified JSON error text does not imply restriction; correlation times out."""
         ban_payload = b'{"error": "sending_ban", "error_code": 1001, "msg": "account restricted"}'
         lz4_frame = _build_synthetic_lz4_frame(ban_payload)
         self.assertEqual(LttkClient._decompress_lz4_frame(lz4_frame), ban_payload)
@@ -820,7 +837,7 @@ class TestFakeWebSocketScenarios(unittest.IsolatedAsyncioTestCase):
                 ws, self.uid, self.target, "Streak hello", timeout_seconds=1.0, db_path=self.db_path
             )
         self.assertEqual(res["status"], ledger.STATUS_FAILED_UNKNOWN)
-        self.assertEqual(res["reason"], ledger.REASON_WS_ERROR)
+        self.assertEqual(res["reason"], ledger.REASON_CORRELATION_TIMEOUT)
 
     async def test_fake_ws_durable_pending_visible_inside_send(self):
         """Pending reservation is committed and visible in database before ws.send completes."""
@@ -847,7 +864,7 @@ class TestFakeWebSocketScenarios(unittest.IsolatedAsyncioTestCase):
         today = "2026-10-08"
 
         # Simulate crash yesterday: left in 'pending' status
-        ledger.reserve_pending(self.uid, self.target["conv_id"], "crashed-yesterday-uuid", date=yesterday, db_path=self.db_path)
+        reserve_at(self.uid, self.target["conv_id"], "crashed-yesterday-uuid", date=yesterday, db_path=self.db_path)
 
         ws = MockWebSocket()
         with patch("ledger.get_current_ho_chi_minh_date", return_value=today):

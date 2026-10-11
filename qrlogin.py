@@ -197,36 +197,49 @@ def _validate_session_name(username: str) -> str:
 
 
 def _ensure_session_dir() -> None:
-    if os.path.exists(_SESSION_DIR) and os.path.islink(_SESSION_DIR):
+    from runtime_paths import session_dir
+    directory = str(session_dir(_SESSION_DIR))
+    if os.path.islink(directory):
         raise PermissionError(f"Symlinks are rejected for session directory: {_SESSION_DIR}")
-    os.makedirs(_SESSION_DIR, mode=0o700, exist_ok=True)
+    os.makedirs(directory, mode=0o700, exist_ok=True)
     if hasattr(os, "chmod") and sys.platform != "win32":
-        os.chmod(_SESSION_DIR, 0o700)
+        os.chmod(directory, 0o700)
 
 
 def _get_session_path(username: str) -> str:
     clean_name = _validate_session_name(username)
     _ensure_session_dir()
-    target_path = os.path.abspath(os.path.join(_SESSION_DIR, f"{clean_name}.json"))
-    abs_session_dir = os.path.abspath(_SESSION_DIR)
+    from runtime_paths import session_dir
+    abs_session_dir = str(session_dir(_SESSION_DIR).absolute())
+    target_path = os.path.abspath(os.path.join(abs_session_dir, f"{clean_name}.json"))
     if os.path.commonpath([abs_session_dir, target_path]) != abs_session_dir:
         raise PermissionError(f"Session path escape detected: {target_path}")
-    if os.path.exists(target_path) and os.path.islink(target_path):
+    if os.path.islink(target_path):
         raise PermissionError(f"Symlinks are rejected for session files: {target_path}")
+    from runtime_paths import contained
+    contained(target_path, must_exist=False, private=True)
     return target_path
 
 
-def _write_cookies(cookies: dict, username: str = "_temp") -> str:
-    """Atomic write of session cookies with exclusive temporary creation and POSIX 0600 permissions.
+def ws_auth_path(username: str) -> str:
+    from runtime_paths import session_dir, contained
+    path = session_dir(_SESSION_DIR) / 'ws-auth' / (_validate_session_name(username) + '.json')
+    return str(contained(path, must_exist=False, private=True))
 
-    POSIX chmod errors fail closed.
-    Note: On Windows, chmod does not configure NTFS ACLs; Windows security relies
-    on standard user profile directory ACL isolation.
-    """
-    _ensure_session_dir()
-    path = _get_session_path(username)
-    if os.path.exists(path) and os.path.islink(path):
-        raise PermissionError(f"Symlinks are rejected for session files: {path}")
+
+def _write_cookies(cookies: dict, username: str = "_temp") -> str:
+    return write_private_json(_get_session_path(username), cookies)
+
+
+def write_private_json(path: str, data: dict) -> str:
+    """Atomic private JSON; POSIX permission errors fail closed. Windows uses directory ACLs."""
+    path = os.path.abspath(path)
+    directory = os.path.dirname(path)
+    if os.path.islink(directory) or os.path.islink(path):
+        raise PermissionError("Symlinks are rejected for credential storage")
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    if sys.platform != "win32":
+        os.chmod(directory, 0o700)
 
     tmp_path = None
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
@@ -235,7 +248,7 @@ def _write_cookies(cookies: dict, username: str = "_temp") -> str:
 
     try:
         while True:
-            candidate_tmp = os.path.join(_SESSION_DIR, f".tmp_{secrets.token_hex(8)}.json")
+            candidate_tmp = os.path.join(directory, f".tmp_{secrets.token_hex(8)}.json")
             try:
                 fd = os.open(candidate_tmp, flags, 0o600)
                 tmp_path = candidate_tmp
@@ -244,7 +257,7 @@ def _write_cookies(cookies: dict, username: str = "_temp") -> str:
                 continue
 
         try:
-            content = json.dumps(cookies, indent=2).encode("utf-8")
+            content = json.dumps(data, indent=2).encode("utf-8")
             total = 0
             while total < len(content):
                 written = os.write(fd, content[total:])
@@ -306,10 +319,12 @@ def load_session(username: str) -> dict:
 
 def list_sessions() -> list[str]:
     _ensure_session_dir()
+    from runtime_paths import session_dir
+    directory = str(session_dir(_SESSION_DIR))
     try:
         return [
-            f[:-5] for f in os.listdir(_SESSION_DIR)
-            if f.endswith(".json") and not f.startswith(".") and not os.path.islink(os.path.join(_SESSION_DIR, f))
+            f[:-5] for f in os.listdir(directory)
+            if f.endswith(".json") and not f.startswith(".") and not os.path.islink(os.path.join(directory, f))
         ]
     except (FileNotFoundError, OSError):
         return []
@@ -359,6 +374,17 @@ def run(did: str | None = None):
 
     path = _write_cookies(cookies, username)
     _log.ok("qrlogin", f"sesion guardada exitosamente: {username}")
+
+    if sys.platform == "win32":
+        try:
+            from ws_auth_capture import capture_session_auth
+            capture_session_auth(username, cookies)
+        except Exception as exc:
+            _log.warn("qrlogin", f"Session saved; browser auth setup incomplete: {type(exc).__name__}. "
+                      "Install requirements-auth-windows.txt and Chromium, then use capture-ws-auth.")
+    else:
+        _log.info("qrlogin", "Browser auth capture is a separate Windows step; see TERMUX.md.")
+
 
 
 def _handle_2fa(opener, passport_ticket: str) -> bool:

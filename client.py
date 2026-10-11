@@ -25,11 +25,15 @@ except ImportError:
 _USER_CACHE_TTL = 60
 
 
+class UnsupportedSafetyOperation(RuntimeError):
+    """Legacy mutation APIs are retained but cannot bypass managed text sending."""
+
+
 _RE_ACCESS_KEY = re.compile(r"^[0-9a-f]{32}$")
 _RE_TTWID = re.compile(r"^1\|[A-Za-z0-9_-]+\|\d+\|[0-9a-f]+$")
 
 
-def load_ws_auth(path: str | None = None) -> dict:
+def load_ws_auth(path: str | None = None, *, session_name: str | None = None, cookies: dict | None = None) -> dict:
     """Load a browser-issued {ttwid, access_key} pair from the local (gitignored) auth file.
 
     The WS gateway answers "authentication failed" unless access_key matches the ttwid
@@ -37,13 +41,38 @@ def load_ws_auth(path: str | None = None) -> dict:
     """
     import json
     import urllib.parse
+    if session_name is not None:
+        from qrlogin import ws_auth_path
+        path = ws_auth_path(session_name)
+    else:
+        import runtime_paths
+        if runtime_paths.root() is not None:
+            raise ValueError('Explicit session-bound WS auth required with runtime root')
     path = path or os.path.join(os.path.dirname(os.path.abspath(__file__)), config.WS_AUTH_FILE)
+    if os.path.islink(path) or os.path.islink(os.path.dirname(os.path.abspath(path))):
+        raise PermissionError("Symlinks are rejected for WS credentials")
     if not os.path.exists(path):
         return {}
-    with open(path, "r", encoding="utf-8") as f:
+    if sys.platform != "win32":
+        os.chmod(os.path.dirname(os.path.abspath(path)), 0o700)
+        os.chmod(path, 0o600)
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(fd, "r", encoding="utf-8-sig") as f:
         data = json.load(f)
+    return validate_ws_auth(data, session_name=session_name, cookies=cookies)
+
+
+def validate_ws_auth(data, *, session_name=None, cookies=None):
+    """Pure validation shared by real loading and non-mutating preflight."""
+    import urllib.parse
     if not isinstance(data, dict):
         raise ValueError(f"{config.WS_AUTH_FILE} must contain a JSON object")
+    if session_name is not None:
+        import hashlib
+        sessionid = (cookies or {}).get("sessionid", "")
+        expected_hash = hashlib.sha256(sessionid.encode()).hexdigest()
+        if not sessionid or data.get("session") != session_name or data.get("session_hash") != expected_hash:
+            raise ValueError("WS auth does not match the selected session; capture auth again on Windows")
     ttwid = urllib.parse.unquote(str(data.get("ttwid", "")).strip())
     access_key = str(data.get("access_key", "")).strip().lower()
     if not _RE_TTWID.match(ttwid) or not _RE_ACCESS_KEY.match(access_key):
@@ -66,12 +95,21 @@ def build_ws_url(cookies: dict, base_url: str | None = None, access_key: str | N
     one issued for that ttwid, otherwise the gateway rejects with "authentication failed".
     """
     import urllib.parse
-    url = base_url or config.WS_URL
-    params = [("access_key", access_key or config.WS_ACCESS_KEY), ("fpid", config.WS_FPID), ("aid", config.WS_AID)]
+    if not isinstance(access_key, str) or not _RE_ACCESS_KEY.fullmatch(access_key):
+        raise ValueError("Explicit browser-issued 32-hex WS access key required")
     ttwid = (cookies or {}).get("ttwid")
-    if ttwid:
-        params.append(("ttwid", urllib.parse.quote(urllib.parse.unquote(ttwid), safe="|")))
-    query = "&".join(f"{k}={v}" for k, v in params if f"{k}=" not in url)
+    if not isinstance(ttwid, str) or not _RE_TTWID.fullmatch(urllib.parse.unquote(ttwid)):
+        raise ValueError("Matching browser-issued WS ttwid required")
+    url = base_url or config.WS_URL
+    # Auth must come exclusively from the explicit pair, never URL/config parameters.
+    for query in (urllib.parse.urlsplit(url).query, config.WS_EXTRA_PARAMS):
+        if any(k.lower() in ("access_key", "ttwid")
+               for k, _ in urllib.parse.parse_qsl(query, keep_blank_values=True)):
+            raise ValueError("WS URL/config must not contain authentication parameters")
+    params = [("access_key", access_key), ("fpid", config.WS_FPID), ("aid", config.WS_AID),
+              ("ttwid", urllib.parse.quote(urllib.parse.unquote(ttwid), safe="|"))]
+    query = "&".join(f"{k}={v}" for k, v in params
+                     if k in ("access_key", "ttwid") or f"{k}=" not in url)
     if config.WS_EXTRA_PARAMS:
         query += "&" + config.WS_EXTRA_PARAMS
     return url + ("&" if "?" in url else "?") + query
@@ -444,6 +482,7 @@ class LttkClient:
                            *, msg: dict | None = None, awe_type: int | None = None,
                            conv_type: int | None = None,
                            client_id: str | None = None) -> tuple[int, str]:
+        raise UnsupportedSafetyOperation('Legacy send_message is unsupported by the Safety Layer; use services.send_plan or the managed queue')
         is_group = False
         if msg is not None:
             if not conv_id:
@@ -477,6 +516,7 @@ class LttkClient:
         return msg_type, actual_client_id
 
     async def send_video(self, conv_id: str, item_id: str, short_id: int = 1) -> int:
+        raise UnsupportedSafetyOperation('Video sending is unsupported by the Safety Layer')
         detail = await asyncio.get_event_loop().run_in_executor(None, get_item_detail, item_id)
         packet, msg_type = build_video_share_packet(
             conv_id        = conv_id,
@@ -493,6 +533,7 @@ class LttkClient:
     async def send_reaction(self, conv_id: str = "", msg_type: int = 0,
                             sender_id: str = "", emoji: str = "❤️",
                             short_id: int = 1, *, msg: dict | None = None):
+        raise UnsupportedSafetyOperation('Reaction sending is unsupported by the Safety Layer')
         if msg is not None:
             if not conv_id:   conv_id   = msg["conv_id"]
             if not msg_type:  msg_type  = msg["msg_type"]
@@ -512,6 +553,7 @@ class LttkClient:
 
     async def delete_message(self, conv_id: str = "", msg_type: int = 0,
                              short_id: int = 1, *, msg: dict | None = None):
+        raise UnsupportedSafetyOperation('Message deletion is unsupported by the Safety Layer')
         if msg is not None:
             if not conv_id:  conv_id  = msg["conv_id"]
             if not msg_type: msg_type = msg["msg_type"]
@@ -528,6 +570,7 @@ class LttkClient:
 
     async def delete_message_everyone(self, conv_id: str = "", msg_type: int = 0,
                                       msg_id: int = 0, *, msg: dict | None = None):
+        raise UnsupportedSafetyOperation('Message deletion for everyone is unsupported by the Safety Layer')
         if msg is not None:
             if not conv_id:  conv_id  = msg["conv_id"]
             if not msg_type: msg_type = msg["msg_type"]
@@ -546,6 +589,7 @@ class LttkClient:
     async def remove_reaction(self, conv_id: str = "", msg_type: int = 0,
                               sender_id: str = "", emoji: str = "❤️",
                               short_id: int = 1, *, msg: dict | None = None):
+        raise UnsupportedSafetyOperation('Reaction removal is unsupported by the Safety Layer')
         if msg is not None:
             if not conv_id:   conv_id   = msg["conv_id"]
             if not msg_type:  msg_type  = msg["msg_type"]
@@ -1010,6 +1054,17 @@ class LttkClient:
             "msg_type":    obj.get("ServerMessageId", 0),
             "op":          modifys[0].get("Op", 0),
         }
+
+    @staticmethod
+    def decode_echo_frame(raw):
+        """Only known compression/message containers; no guessed error codes."""
+        if not isinstance(raw, bytes):
+            return []
+        candidates = LttkClient.find_all_msgbodies(raw)
+        if candidates:
+            return candidates
+        decoded = LttkClient._decompress_lz4_frame(raw)
+        return LttkClient.find_all_msgbodies(decoded) if decoded else []
 
     @staticmethod
     def find_all_msgbodies(raw: bytes, depth: int = 0) -> list[dict]:
@@ -1512,9 +1567,9 @@ class LttkClient:
             _log.warn("lttk", f"error al cerrar sesion en TikTok ({e})")
 
         if self._active_session:
-            from .qrlogin import _SESSION_DIR
+            from .qrlogin import _get_session_path
             import os
-            path = os.path.join(_SESSION_DIR, f"{self._active_session}.json")
+            path = _get_session_path(self._active_session)
             try:
                 os.remove(path)
                 _log.ok("lttk", f"credencial eliminada: {self._active_session}.json")
@@ -1560,6 +1615,7 @@ class LttkClient:
         return False
 
     async def run(self):
+        raise UnsupportedSafetyOperation('Legacy client.run is unsupported by the Safety Layer; use managed text CLI/services')
         if not self._cookies.get("sessionid"):
             if not self._load_session():
                 _log.warn("lttk", "no hay sesion, iniciando login por QR...")

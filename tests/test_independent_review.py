@@ -1,4 +1,5 @@
 """Reviewer regressions; no accounts, credentials, or external network."""
+from ledger_fixtures import fixture_create, fixture_start, fixture_send
 import contextlib
 import asyncio
 import io
@@ -15,6 +16,7 @@ sys.path.insert(0, str(ROOT))
 import main
 import oneshot
 import ledger
+from ledger_fixtures import reserve_at, initialize_fixture
 import log
 import qrlogin
 from client import LttkClient
@@ -24,7 +26,7 @@ from core.proto import f_str, f_varint, f_bytes
 class IndependentReview(unittest.TestCase):
     def setUp(self):
         # Never pick up a real browser ttwid/access_key from the developer's ws_auth.local.json
-        p = patch.object(oneshot, "load_ws_auth", return_value={})
+        p = patch.object(oneshot, "load_ws_auth", return_value={"ttwid": "1|fake-secret-ttwid|1|aa", "access_key": "c" * 32})
         p.start()
         self.addCleanup(p.stop)
 
@@ -57,8 +59,6 @@ class IndependentReview(unittest.TestCase):
         )
         self.assertNotIn("fake-sid", url)
         self.assertNotIn("fake_tok", url)
-        self.assertIn("access_key=277f7a051d7a540326780c413dbc2b9c", build_ws_url({}))
-        self.assertNotIn("ttwid=", build_ws_url({}))
 
     def test_ws_auth_file_pair_is_validated_and_overrides_session_ttwid(self):
         from client import apply_ws_auth, load_ws_auth
@@ -93,6 +93,8 @@ class IndependentReview(unittest.TestCase):
         connect = AsyncMock(side_effect=InvalidStatus(response))
         send_target = AsyncMock()
         with tempfile.TemporaryDirectory() as tmp:
+            initialize_fixture(str(Path(tmp) / "ledger.db"))
+            __import__("circuit_breaker").bind_session("111", "fake", db_path=str(Path(tmp) / "ledger.db"))
             plan = Path(tmp) / "plan.json"
             plan.write_text(json.dumps({"session": "fake", "message": "hi",
                                         "targets": [{"conv_id": "0:1:1:2", "conv_short_id": 7, "conv_type": 1}]}),
@@ -100,11 +102,10 @@ class IndependentReview(unittest.TestCase):
             output = io.StringIO()
             with patch.object(oneshot, "load_session", return_value=dict(cookies)), \
                     patch.object(oneshot, "get_own_user_id", return_value="111"), \
-                    patch.object(ledger, "RunLock", lambda *a, **k: contextlib.nullcontext()), \
                     patch("websockets.connect", connect), \
                     patch.object(oneshot, "_send_target_oneshot", send_target), \
                     contextlib.redirect_stdout(output):
-                with self.assertRaises(InvalidStatus):
+                with self.assertRaises(__import__('circuit_breaker').CircuitOpen):
                     asyncio.run(oneshot.run_oneshot_send(config_path=str(plan), validate_server=False,
                                                          db_path=str(Path(tmp) / "ledger.db")))
         send_target.assert_not_called()
@@ -112,7 +113,7 @@ class IndependentReview(unittest.TestCase):
         text = output.getvalue()
         self.assertIn("im-ws-sg.tiktok.com/ws/v2", text)
         self.assertIn("query params: device_platform, version_code, access_key, fpid, aid, ttwid, xsack", text)
-        self.assertIn("handshake-msg: fake handshake reason", text)
+        self.assertNotIn("fake handshake reason", text)
         self.assertIn("response: 400", text)
         self.assertNotIn("fake-secret", text)
 
@@ -162,7 +163,7 @@ class IndependentReview(unittest.TestCase):
                 patch("websockets.connect", AsyncMock(side_effect=InvalidStatus(response))), \
                 contextlib.redirect_stdout(io.StringIO()) as output:
             self.assertEqual(main.cmd_ws_probe("fake"), 1)
-        self.assertIn("handshake-msg: authentication failed", output.getvalue())
+        self.assertNotIn("authentication failed", output.getvalue())
         self.assertIn("HTTP 400", output.getvalue())
         self.assertNotIn("fake-secret", output.getvalue())
 
@@ -206,9 +207,9 @@ class IndependentReview(unittest.TestCase):
     def test_pending_survives_restart_and_next_date(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = str(Path(tmp) / "state" / "ledger.db")
-            ledger.reserve_pending("111", "0:1:111:222", "fake-uuid", date="2026-10-08", db_path=path)
+            reserve_at("111", "0:1:111:222", "fake-uuid", date="2026-10-08", db_path=path)
             with self.assertRaises(ledger.QuotaExceededError):
-                ledger.reserve_pending("111", "0:1:111:222", "different-uuid", date="2026-10-09", db_path=path)
+                reserve_at("111", "0:1:111:222", "different-uuid", date="2026-10-09", db_path=path)
 
     def test_malformed_echo_is_not_confirmation(self):
         body = (f_str(1, "0:1:111:222") + f_varint(2, 1) + f_varint(3, 1234)
@@ -338,6 +339,7 @@ class IndependentSendReview(unittest.IsolatedAsyncioTestCase):
         target = {"conv_id": "0:1:111:222", "conv_short_id": 8888, "conv_type": 1}
         with tempfile.TemporaryDirectory() as tmp:
             db = str(Path(tmp) / "state" / "ledger.db")
+            initialize_fixture(db)
             frames = []
             if echo_sender is not None:
                 body = (f_str(1, target["conv_id"]) + f_varint(2, 1) + f_varint(3, 1234)
@@ -368,9 +370,10 @@ class IndependentSendReview(unittest.IsolatedAsyncioTestCase):
             output = io.StringIO()
             with patch.object(oneshot.uuid, "uuid4", return_value="fake-uuid"), \
                     patch.object(ledger, "get_current_ho_chi_minh_date", return_value="2026-10-08"), \
+                    patch("ledger_requests.utc_now_ms", return_value=1791435600000), \
                     contextlib.redirect_stdout(output):
-                result = await oneshot._send_target_oneshot(ws, "111", target, "hi", timeout_seconds=0.1, db_path=db)
-                repeat = await oneshot._send_target_oneshot(ws, "111", target, "hi", timeout_seconds=0.1, db_path=db)
+                result = await fixture_send(ws, "111", target, "hi", timeout_seconds=0.1, db_path=db)
+                repeat = await fixture_send(ws, "111", target, "hi", timeout_seconds=0.1, db_path=db)
             self.assertEqual(ws.sends, 1)
             self.assertEqual(repeat["status"], "skipped")
             self.assertNotIn("never-log-this-value", output.getvalue())

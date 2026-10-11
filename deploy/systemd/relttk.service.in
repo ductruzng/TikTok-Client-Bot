@@ -1,0 +1,35 @@
+[Unit]
+Description=ReLttk explicitly authorized bounded tick
+Wants=network-online.target
+After=network-online.target time-sync.target
+
+[Service]
+Type=oneshot
+User=relttk
+Group=relttk
+UMask=0077
+WorkingDirectory=@WORKDIR@
+Environment=TIKTOK_RUNTIME_DIR=@RUNTIME@
+Environment=NO_COLOR=1
+Environment=PYTHONUNBUFFERED=1
+ExecStart=@PYTHON@ -B @ENTRY@ schedule-tick --db @DB@ --grant-id @GRANT_ID@ --grant-fingerprint @FINGERPRINT@ --execute --yes --operational-output
+RemainAfterExit=no
+Restart=no
+TimeoutStartSec=600
+TimeoutStopSec=90
+KillSignal=SIGTERM
+KillMode=control-group
+StandardOutput=journal
+# Bootstrap/import errors must not emit tracebacks before a safe sink exists.
+StandardError=null
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateDevices=yes
+CapabilityBoundingSet=
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=@RUNTIME@
+
+# Deliberately no Install section: artifacts never activate services.
