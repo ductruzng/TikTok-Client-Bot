@@ -42,6 +42,7 @@ assert script['ROOT']==REPO
 
     def test_cookie_helper_import_with_windows_platform_only(self):
         self.child('''from unittest.mock import patch
+import shutil,sqlite3,tempfile
 with patch.object(sys,'platform','win32'):
  import tools.browsercookies as tool
 assert callable(tool.get_tiktok_cookies)

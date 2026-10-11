@@ -305,6 +305,9 @@ class ScheduleTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):self.review()
 
     def test_legacy_tui_timer_and_scheduler_source_cannot_send(self):
+        import importlib.util
+        if importlib.util.find_spec('textual') is None:
+            self.skipTest('Full TUI coverage requires requirements/tui.txt; core-only run is not full acceptance')
         from tiktok_tui import TikTokTUI
         fake=type('Fake',(),{'call_from_thread':lambda *_:None,'_activity':lambda *_:None})()
         with patch.object(services,'send_plan',side_effect=AssertionError('unattended')):

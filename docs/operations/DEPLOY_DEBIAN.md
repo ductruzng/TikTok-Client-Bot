@@ -140,3 +140,12 @@ for actual timer lifecycle evidence. No Linux environment was provisioned here.
 Owner online checks account provenance/binding, controlled recipient delivery,
 streak credit separately, privacy, stop, expiry and backup recovery before normal
 use. Internal rate limits are not guaranteed bot-detection thresholds.
+
+## Full guarded fixture dependencies
+
+Core deployment dependencies remain in requirements.txt. For full offline test
+coverage also install requirements/tui.txt into the disposable test environment;
+Textual is optional for the core CLI but required for the actual TUI regression.
+A core-only run with additional TUI skips is not equivalent to the full baseline.
+The [Debian staging harness report](DEBIAN13_STAGING_FIX.md) describes descriptor
+relative cleanup protection and native Linux checks that the Owner must rerun.
