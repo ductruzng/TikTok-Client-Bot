@@ -137,6 +137,41 @@ The optional TUI smoke test is skipped when Textual is absent. Tested locally on
 Windows/Python 3.10 with Textual 8.2.8 and Playwright 1.63.0 installed; browser
 capture and live TikTok operations were not run.
 
+## Finite queue worker (Phase 3E)
+
+See [PHASE3E.md](PHASE3E.md) for SQLite V7, explicit manifest consent,
+`worker-preview`, `worker-authorize`, `worker-status`, `worker-run` and
+`worker-revoke`. The worker processes existing approved requests only. It can
+wait for temporal admission limits within its original deadline; it never
+enqueues work or retries UNKNOWN. Preview/status/default run are read-only.
+Real migration and live sending remain subject to separate Owner approval.
+Guarded offline regression: `python -B tests/run_offline.py` (281 PASS).
+
+## Production readiness (Phase 4A)
+
+[PHASE4A.md](PHASE4A.md) documents explicit runtime paths, non-mutating
+`runtime-preflight` and identity administration. **Real bootstrap and managed
+sending currently fail closed:** authenticated-self UID provenance has not yet
+been established, and a generic `odinId` is not accepted as evidence. This is
+an offline readiness implementation, not approval for live sending or deployment.
+
 ## License
 
 MIT
+# Phase 4B offline daily automation
+
+Bounded recurring grants and one-shot `schedule-tick` are documented in
+[PHASE4B.md](PHASE4B.md). Default operation is preview; authorize and activate
+are separate interactive actions. SQLite V8 requires explicit administration.
+No scheduler is installed. Identity Contract remains blocked; online operation
+is not certified. Old TUI enabled preferences do not authorize automatic sends.
+
+# Phase 4C offline deployment artifacts
+
+See [DEPLOY_DEBIAN.md](DEPLOY_DEBIAN.md) for staged units, safe operational
+metadata, explicit SQLite backup and non-destructive recovery. No service is
+installed or activated by these artifacts. Identity remains BLOCKED; actual
+Debian/systemd/live verification is separate. WAL backup requires Python's
+SQLite no-checkpoint-on-close capability. Rendering supports one recipient per
+grant and rejects unsupported workloads.
+

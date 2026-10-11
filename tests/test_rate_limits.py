@@ -1,4 +1,5 @@
 """3A offline limits, schema administration and process-contention regressions."""
+from ledger_fixtures import fixture_create, fixture_start, fixture_send
 import asyncio
 from contextlib import closing, redirect_stdout
 from datetime import datetime
@@ -29,10 +30,10 @@ BASE = epoch('2026-10-09T12:00:00+07:00')
 def contend(path, index, barrier, output, settings):
     # Each contender has a separate interpreter and SQLite connection.
     with patch.object(requests, 'utc_now_ms', return_value=BASE):
-        row, _ = requests.create_request('u', f'new-{index}', f'race-{index}', {'message': 'hello'}, db_path=path)
+        row, _ = fixture_create('u', f'new-{index}', f'race-{index}', {'message': 'hello'}, db_path=path)
         barrier.wait(timeout=15)
         try:
-            requests.start_transmission(row['request_id'], db_path=path, **settings)
+            fixture_start(row['request_id'], db_path=path, **settings)
             requests.finish('u', row['conv_id'], '2026-10-09', row['client_msg_id'], db_path=path,
                             status='confirmed', reason='CONFIRMED_ECHO', server_id='123')
             output.put('admitted')
@@ -54,11 +55,11 @@ class RateLimitTests(unittest.TestCase):
 
     def request(self, uid='u', cid=None, key=None):
         self.sequence += 1
-        return requests.create_request(uid, cid or f'c-{self.sequence}', key or f'key-{self.sequence}',
+        return fixture_create(uid, cid or f'c-{self.sequence}', key or f'key-{self.sequence}',
                                        {'message': 'hello'}, db_path=self.path)[0]
 
     def start(self, row, **settings):
-        return requests.start_transmission(row['request_id'], db_path=self.path, **settings)
+        return fixture_start(row['request_id'], db_path=self.path, **settings)
 
     def finish(self, row, status='confirmed'):
         stored = requests.get_request(row['request_id'], db_path=self.path)
@@ -183,7 +184,7 @@ class RateLimitTests(unittest.TestCase):
         failed = self.request()
         requests.fail_pretransmit(failed['request_id'], db_path=self.path)
         first = self.send(max_sends_per_account_per_day=1)
-        replay, created = requests.create_request('u', first['conv_id'], first['idempotency_key'],
+        replay, created = fixture_create('u', first['conv_id'], first['idempotency_key'],
                                                   {'message': 'hello'}, db_path=self.path)
         self.assertFalse(created)
         self.assertFalse(self.start(replay, max_sends_per_account_per_day=1))
@@ -423,12 +424,12 @@ class RateLimitCLITests(unittest.IsolatedAsyncioTestCase):
             path = str(Path(tmp) / 'fixture.db')
             migrations.initialize(path)
             with patch.object(requests, 'utc_now_ms', return_value=BASE):
-                first, _ = requests.create_request('u', 'other', 'first', {}, db_path=path)
-                requests.start_transmission(first['request_id'], db_path=path)
+                first, _ = fixture_create('u', 'other', 'first', {}, db_path=path)
+                fixture_start(first['request_id'], db_path=path)
                 requests.finish('u', 'other', '2026-10-09', first['client_msg_id'], db_path=path,
                                 status='confirmed', reason='CONFIRMED_ECHO', server_id='123')
                 ws = MockWebSocket()
-                result = await oneshot._send_target_oneshot(ws, 'u', {'conv_id': 'c', 'conv_short_id': 1, 'conv_type': 1},
+                result = await fixture_send(ws, 'u', {'conv_id': 'c', 'conv_short_id': 1, 'conv_type': 1},
                     'hello', db_path=path, max_sends_per_account_per_day=1, max_sends_per_window=1)
                 self.assertEqual(ws.sent_packets, [])
                 self.assertEqual({r['code'] for r in result['blocks']}, {'ACCOUNT_DAILY_LIMIT', 'MIN_INTERVAL', 'SLIDING_WINDOW'})

@@ -383,7 +383,7 @@ def cmd_status(config_path: str = DEFAULT_CONFIG_FILE, db_path: str | None = Non
             return 0
         try:
             cur = conn.cursor()
-            if conn.execute("PRAGMA user_version").fetchone()[0] in (2, 3, 4, 5):
+            if conn.execute("PRAGMA user_version").fetchone()[0] in (2, 3, 4, 5, 6, 7):
                 for row in conn.execute("SELECT request_id,date,status,conv_id,transmitted FROM send_requests ORDER BY created_at DESC LIMIT 20"):
                     print(f"  Request {row[0]} | {row[1] or '-'} | {row[2]} | {row[3]} | transmitted={row[4]}")
                 return 0
@@ -412,7 +412,7 @@ def cmd_ledger_admin(command, db_path):
     try:
         if command == "ledger-initialize":
             ledger_migrations.initialize(db_path)
-            print("Initialized schema V5. No TikTok access.")
+            print(f"Initialized schema V{ledger_migrations.VERSION}. No TikTok access.")
             return 0
         report = ledger_migrations.preflight(db_path)
         print(json.dumps(report, ensure_ascii=False, indent=2))
@@ -420,7 +420,7 @@ def cmd_ledger_admin(command, db_path):
             return 1
         if command == "ledger-migrate":
             backup = ledger_migrations.migrate(db_path)
-            print(f"Schema V5 ready. Backup: {backup or 'unchanged (already V5)'}")
+            print(f"Schema V{ledger_migrations.VERSION} ready. Backup: {backup or 'unchanged'}")
         return 0
     except Exception as exc:
         print(f"Ledger administration failed: {type(exc).__name__}: {exc}")
@@ -494,6 +494,226 @@ def cmd_breaker_admin(args):
         return 1
 
 
+def cmd_queue_admin(args):
+    import asyncio
+    import ledger
+    import services
+    try:
+        if args.command == 'queue-enqueue':
+            result = services.queue_enqueue(args.config, args.idempotency_key, db_path=args.db, apply=args.apply)
+        elif args.command == 'queue-list':
+            result = services.queue_list(db_path=args.db, session=args.session)
+        elif args.command == 'queue-bind':
+            result = services.queue_bind_preview(args.request_id, args.config, db_path=args.db)
+            print(json.dumps(result, ensure_ascii=True, indent=2))
+            if not (sys.stdin.isatty() and sys.stdout.isatty()):
+                raise ValueError('Queue binding requires interactive preview and confirmation')
+            reason = input('Required reason (no credentials): ')
+            if input('Type BIND to confirm: ') != 'BIND':
+                return 1
+            services.queue_bind(args.request_id, args.config, result, reason, db_path=args.db)
+            print('Binding recorded. No message sent. Snapshot approval remains separate.')
+            return 0
+        else:
+            result = services.queue_run_preview(db_path=args.db, session=args.session)
+            print(json.dumps(result, ensure_ascii=True, indent=2))
+            if not args.execute:
+                return 0
+            if not (sys.stdin.isatty() and sys.stdout.isatty()):
+                raise ValueError('Queue run-once execution is interactive only; --yes does not authorize it')
+            if input('Type RUN to review and execute this finite queue run: ') != 'RUN':
+                return 1
+            result = asyncio.run(services.queue_run_once(db_path=args.db, session=args.session,
+                max_jobs=args.max_jobs, confirm_request=confirm_snapshot))
+        print(json.dumps(result, ensure_ascii=True, indent=2))
+        return 0 if args.command != 'queue-run-once' or all(services.send_result_completed(r) for r in result['results']) else 1
+    except (ValueError, OSError, ledger.LedgerError) as exc:
+        print(f'Queue operation blocked: {exc}')
+        return 1
+
+
+def cmd_unknown_admin(args):
+    import ledger
+    import services
+    import unknown_resolution
+    try:
+        preview = services.unknown_preview(args.request_id, db_path=args.db)
+        print(json.dumps(preview, ensure_ascii=True, indent=2))
+        if args.command == 'unknown-show':
+            return 0
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            raise ValueError('UNKNOWN resolution requires interactive evidence review and separate confirmation')
+        action = args.action or input('Action (KEEP_BLOCKED / CLOSE_WITHOUT_RESEND / AUTHORIZE_REPLACEMENT): ')
+        if action not in unknown_resolution.ACTIONS:
+            raise ValueError('Invalid decision')
+        reason = input('Required reason (no credentials): ')
+        evidence = input('Required observation/reference (no credentials or raw logs): ')
+        challenge = action + ' ' + args.request_id + ' ' + preview['fingerprint']
+        if input('Type ' + challenge + ' to confirm: ') != challenge:
+            return 1
+        result = services.unknown_resolve(args.request_id, action, preview, reason, evidence, db_path=args.db)
+        print(json.dumps(result, indent=2))
+        if result['replacement_request_id']:
+            print('Replacement queued; UNKNOWN quota retained. Review queue limits and reset circuits separately. No message sent.')
+        return 0
+    except (ValueError, OSError, ledger.LedgerError) as exc:
+        print(f'UNKNOWN review blocked: {exc}')
+        return 1
+
+
+def cmd_readiness_admin(args):
+    import services
+    try:
+        if args.command == 'runtime-preflight':
+            result = services.runtime_preflight(args.runtime_dir, args.db, args.config,
+                                               check_credentials=args.check_credentials)
+            print(json.dumps(result, ensure_ascii=True, indent=2))
+            return 2 if result['state'] == 'BLOCKED' else 1
+        if args.apply and not args.live:
+            raise ValueError('Explicit --live is required before identity apply')
+        if not args.live:
+            result = services.identity_preview(args.session, db_path=args.db)
+            print(json.dumps(result, ensure_ascii=True, indent=2))
+            return 0
+        review = services.identity_verify(args.session, db_path=args.db)
+        print(json.dumps(review.public(), ensure_ascii=True, indent=2))
+        if not args.apply:
+            return 0
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            raise ValueError('Interactive identity approval required')
+        reason = input('Required identity binding reason (no credentials): ')
+        challenge = 'BIND ' + review.session + ' ' + review.uid
+        if input('Type ' + challenge + ': ') != challenge:
+            return 1
+        services.identity_apply(review, reason, db_path=args.db)
+        print('Identity bound; no message sent')
+        return 0
+    except Exception as exc:
+        print('Readiness/identity blocked: ' + type(exc).__name__)
+        return 2
+
+
+def cmd_worker_admin(args):
+    import asyncio
+    import signal
+    import services
+    import ledger
+    try:
+        if args.command in ('worker-preview', 'worker-authorize'):
+            expires = None
+            if args.expires_at:
+                from datetime import datetime
+                value = datetime.fromisoformat(args.expires_at.replace('Z', '+00:00'))
+                if value.tzinfo is None:
+                    raise ValueError('Expiry must include a timezone offset')
+                expires = int(value.timestamp()*1000)
+            review = services.worker_preview(args.session, args.request_id, db_path=args.db,
+                max_jobs=args.max_jobs, max_wait=args.max_wait, expires_at_ms=expires)
+            print(json.dumps(review, ensure_ascii=True, indent=2))
+            if args.command == 'worker-preview' or not args.apply:
+                return 0
+            if not (sys.stdin.isatty() and sys.stdout.isatty()):
+                raise ValueError('Worker consent requires interactive preview and separate confirmation')
+            reason = input('Required approval reason (no credentials): ')
+            if input('Type APPROVE ' + review['fingerprint'] + ': ') != 'APPROVE ' + review['fingerprint']:
+                return 1
+            run_id = services.worker_authorize(review, reason, db_path=args.db)
+            print('Approved run: ' + run_id + '; no message sent')
+            return 0
+        current = services.worker_status(args.run_id, db_path=args.db)
+        if args.command == 'worker-status' or (args.command == 'worker-run' and not args.execute):
+            print(json.dumps(current, ensure_ascii=True, indent=2))
+            return 0
+        if args.command == 'worker-revoke':
+            print(json.dumps(current, ensure_ascii=True, indent=2))
+            if not (sys.stdin.isatty() and sys.stdout.isatty()):
+                raise ValueError('Worker revocation requires interactive review')
+            reason = input('Required revocation reason: ')
+            challenge = 'REVOKE ' + args.run_id + ' ' + current['fingerprint']
+            if input('Type ' + challenge + ': ') != challenge:
+                return 1
+            services.worker_revoke(args.run_id, current, reason, db_path=args.db)
+            return 0
+        if not args.yes or not args.manifest_fingerprint:
+            raise ValueError('Worker execution requires --yes and the exact approved manifest fingerprint')
+        async def execute():
+            stop = asyncio.Event()
+            previous = {}
+            try:
+                for sig in (signal.SIGINT, signal.SIGTERM):
+                    previous[sig] = signal.signal(sig, lambda *_: stop.set())
+                return await services.worker_run(args.run_id, args.manifest_fingerprint, db_path=args.db, stop_event=stop)
+            finally:
+                for sig, handler in previous.items():
+                    signal.signal(sig, handler)
+        result = asyncio.run(execute())
+        print(json.dumps(result, ensure_ascii=True, indent=2))
+        return {'COMPLETE': 0, 'HELD': 1, 'WAIT_LIMIT': 2, 'NEEDS_OWNER_REVIEW': 3, 'BUSY': 4, 'STOPPED': 130}.get(result['state'], 3)
+    except (ValueError, OSError, ledger.LedgerError) as exc:
+        # No raw policy content, network response or credentials in operational diagnostics.
+        print('Worker operation blocked: ' + getattr(exc, 'code', type(exc).__name__))
+        return 3
+
+
+def cmd_schedule_admin(args):
+    import asyncio
+    import signal
+    import services
+    import ledger
+    try:
+        if args.command in ('schedule-preview', 'schedule-authorize'):
+            review = services.schedule_preview(args.config, args.schedule_id, db_path=args.db,
+                **{k:getattr(args,k) for k in ('time','valid_from','valid_through','window_minutes','daily_budget','total_budget','max_wait')})
+            print(json.dumps(review, ensure_ascii=True, indent=2))
+            if args.command == 'schedule-preview' or not args.apply:
+                return 0
+            if not (sys.stdin.isatty() and sys.stdout.isatty()):
+                raise ValueError('Interactive recurring authorization required')
+            reason = input('Required reason (no credentials): ')
+            challenge = 'AUTHORIZE ' + review['fingerprint']
+            if input('Type ' + challenge + ': ') != challenge:
+                return 1
+            gid = services.schedule_authorize(review,reason,db_path=args.db)
+            print('Authorized grant: '+gid+'; inactive; no message sent')
+            return 0
+        if args.command == 'schedule-tick':
+            if args.execute and not args.yes:
+                raise ValueError('Execution requires --execute --yes and grant fingerprint')
+            async def execute():
+                stop = asyncio.Event()
+                previous = {}
+                try:
+                    if args.execute:
+                        for sig in (signal.SIGINT,signal.SIGTERM):
+                            previous[sig] = signal.signal(sig,lambda *_: stop.set())
+                    return await services.schedule_tick(args.grant_id,args.grant_fingerprint,db_path=args.db,
+                        execute=args.execute,enqueue_only=args.enqueue,stop_event=stop)
+                finally:
+                    for sig,handler in previous.items(): signal.signal(sig,handler)
+            result=asyncio.run(execute())
+            if args.operational_output:
+                import operations
+                operations.note(result)
+            print(json.dumps(result,ensure_ascii=True,indent=2))
+            state=result.get('worker',result).get('state')
+            return 0 if state in ('DUE','ENQUEUED','EXISTING','COMPLETE','NOT_DUE') else 2
+        current = services.schedule_status(args.grant_id,db_path=args.db)
+        print(json.dumps(current,ensure_ascii=True,indent=2))
+        if args.command == 'schedule-status': return 0
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            raise ValueError('Interactive recurring administration required')
+        action = {'schedule-activate':'ACTIVATED','schedule-pause':'PAUSED','schedule-revoke':'REVOKED'}[args.command]
+        reason=input('Required reason (no credentials): ')
+        challenge=args.command.removeprefix('schedule-').upper()+' '+args.grant_id+' '+current['fingerprint']+' '+str(current['event']['version'])
+        if input('Type '+challenge+': ') != challenge: return 1
+        services.schedule_change(args.grant_id,current,action,reason,db_path=args.db)
+        print(action+'; no message sent')
+        return 0
+    except (ValueError, OSError, ledger.LedgerError) as exc:
+        print('Schedule operation blocked: '+getattr(exc,'code',type(exc).__name__))
+        return 3
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="ReLttk Daily Streak Bot - Safe One-Shot CLI",
@@ -522,6 +742,77 @@ def main() -> int:
     )
 
     subparsers = parser.add_subparsers(dest="command", help="Additional commands")
+    ready = subparsers.add_parser('runtime-preflight', help='Non-mutating local runtime readiness; no network')
+    ready.add_argument('--runtime-dir', required=True)
+    ready.add_argument('--db', required=True)
+    ready.add_argument('--config', required=True)
+    ready.add_argument('--check-credentials', action='store_true')
+    identity = subparsers.add_parser('identity-verify', help='Explicit authenticated-self bootstrap; default local preview')
+    identity.add_argument('--db', required=True)
+    identity.add_argument('--session', required=True)
+    identity.add_argument('--live', action='store_true')
+    identity.add_argument('--apply', action='store_true')
+    for command in ('schedule-preview','schedule-authorize','schedule-activate','schedule-status','schedule-pause','schedule-revoke','schedule-tick'):
+        admin=subparsers.add_parser(command,help='Bounded recurring authority; disabled until explicit activation')
+        admin.add_argument('--db',required=True)
+        if command in ('schedule-preview','schedule-authorize'):
+            admin.add_argument('--config',required=True)
+            admin.add_argument('--schedule-id',required=True)
+            admin.add_argument('--time',default='08:00')
+            admin.add_argument('--valid-from')
+            admin.add_argument('--valid-through')
+            admin.add_argument('--window-minutes',type=int,default=60)
+            admin.add_argument('--daily-budget',type=int)
+            admin.add_argument('--total-budget',type=int)
+            admin.add_argument('--max-wait',type=int,default=300)
+            if command=='schedule-authorize': admin.add_argument('--apply',action='store_true')
+        else:
+            admin.add_argument('--grant-id',required=True)
+        if command=='schedule-tick':
+            admin.add_argument('--operational-output',action='store_true',help='Bounded allowlist metadata; suppress raw stdout/stderr')
+            admin.add_argument('--grant-fingerprint')
+            modes=admin.add_mutually_exclusive_group()
+            modes.add_argument('--enqueue',action='store_true')
+            modes.add_argument('--execute',action='store_true')
+            admin.add_argument('--yes',action='store_true')
+    for command in ('worker-preview', 'worker-authorize', 'worker-run', 'worker-status', 'worker-revoke'):
+        admin = subparsers.add_parser(command, help='Explicit finite worker authority; no enqueue or scheduler')
+        admin.add_argument('--db', required=True)
+        if command in ('worker-preview', 'worker-authorize'):
+            admin.add_argument('--session', required=True)
+            admin.add_argument('--request-id', action='append', required=True)
+            admin.add_argument('--max-jobs', type=int, default=1)
+            admin.add_argument('--max-wait', type=int, default=300)
+            admin.add_argument('--expires-at', help='ISO timestamp with timezone; default next local midnight')
+        else:
+            admin.add_argument('--run-id', required=True)
+        if command == 'worker-authorize':
+            admin.add_argument('--apply', action='store_true', help='Interactive consent; default preview only')
+        if command == 'worker-run':
+            admin.add_argument('--manifest-fingerprint')
+            admin.add_argument('--yes', action='store_true')
+            admin.add_argument('--execute', action='store_true', help='Execute existing approved run; default read-only status')
+    for command in ('queue-enqueue', 'queue-list', 'queue-run-once', 'queue-bind'):
+        admin = subparsers.add_parser(command, help='Managed durable queue; preview by default')
+        admin.add_argument('--db', required=True)
+        if command in ('queue-enqueue', 'queue-bind'):
+            admin.add_argument('--config', required=True)
+        if command == 'queue-enqueue':
+            admin.add_argument('--idempotency-key', required=True)
+            admin.add_argument('--apply', action='store_true', help='Explicitly enqueue; never sends')
+        if command == 'queue-bind':
+            admin.add_argument('--request-id', required=True)
+        if command in ('queue-list', 'queue-run-once'):
+            admin.add_argument('--session', required=command == 'queue-run-once')
+        if command == 'queue-run-once':
+            admin.add_argument('--execute', action='store_true', help='Interactive bounded execution; default is offline preview')
+            admin.add_argument('--max-jobs', type=int, default=1)
+    for command in ('unknown-show', 'unknown-resolve'):
+        admin = subparsers.add_parser(command, help='Offline Owner review; no automatic resend')
+        admin.add_argument('--db', required=True)
+        admin.add_argument('--request-id', required=True)
+        if command == 'unknown-resolve':
+            admin.add_argument('--action', choices=('KEEP_BLOCKED', 'CLOSE_WITHOUT_RESEND', 'AUTHORIZE_REPLACEMENT'))
     for command in ('request-show', 'request-cancel', 'request-approve-snapshot', 'rotation-skip-selection'):
         admin = subparsers.add_parser(command, help='Explicit request/rotation administration; no TikTok access')
         admin.add_argument('--db', required=True)
@@ -544,6 +835,14 @@ def main() -> int:
         admin = subparsers.add_parser(command, help="Explicit offline ledger administration")
         admin.add_argument("--db", required=True, help="Exact database path (no implicit default)")
 
+    health = subparsers.add_parser('operational-status', help='Quiescent-only metadata status; no credentials/network')
+    health.add_argument('--db', required=True)
+    health.add_argument('--grant-id', required=True)
+    health.add_argument('--operational-output', action='store_true')
+    backup = subparsers.add_parser('ledger-backup', help='Explicit SQLite Backup API; never restore')
+    backup.add_argument('--db', required=True)
+    backup.add_argument('--destination', required=True)
+    backup.add_argument('--operational-output', action='store_true')
     subparsers.add_parser("login", help="Interactive QR login to save a session")
 
     list_parser = subparsers.add_parser(
@@ -574,6 +873,36 @@ def main() -> int:
     # Reject mode flags with subcommands before any network activity
     if args.command is not None and (args.send or args.dry_run):
         parser.error("Mode flags (--send, --dry-run) cannot be combined with subcommands.")
+
+    if args.command in ('operational-status', 'ledger-backup'):
+        try:
+            import services
+            if args.command == 'operational-status':
+                result = services.operational_status(args.grant_id, db_path=args.db)
+            else:
+                result = services.ledger_backup(args.db, args.destination)
+            import operations
+            operations.note(result)
+            print(json.dumps(operations.metadata(result), separators=(',', ':')))
+            return 0 if result['state'] == 'BACKUP_COMPLETE' else 2
+        except Exception as exc:
+            import operations
+            reason = str(exc)
+            result = dict(state='BLOCKED', reason=reason if reason in operations.REASONS else 'OPERATION_FAILED')
+            operations.note(result)
+            print(json.dumps(result))
+            return 3
+    if args.command in ('runtime-preflight', 'identity-verify'):
+        return cmd_readiness_admin(args)
+    if args.command and args.command.startswith('schedule-'):
+        return cmd_schedule_admin(args)
+    if args.command and args.command.startswith('worker-'):
+        return cmd_worker_admin(args)
+
+    if args.command in ('queue-enqueue', 'queue-list', 'queue-run-once', 'queue-bind'):
+        return cmd_queue_admin(args)
+    if args.command in ('unknown-show', 'unknown-resolve'):
+        return cmd_unknown_admin(args)
 
     if args.command in ('breaker-status', 'breaker-history', 'breaker-reset'):
         return cmd_breaker_admin(args)
@@ -613,4 +942,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    if '--operational-output' in sys.argv:
+        from operations import cli_entry
+        sys.exit(cli_entry(main))
     sys.exit(main())

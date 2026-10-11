@@ -1,4 +1,5 @@
 """CLI regressions; all plans, databases and transport are fixtures."""
+from ledger_fixtures import fixture_create, fixture_start, fixture_send
 import asyncio
 from contextlib import redirect_stdout
 from copy import deepcopy
@@ -77,18 +78,18 @@ class CLIHardeningTests(unittest.TestCase):
         for mode in ('snapshot', 'quota', 'pretransmit', 'declined'):
             path = str(Path(self.tmp.name) / (mode + '.db'))
             ledger_migrations.initialize(path)
-            row, _ = ledger_requests.create_request('u', 'c', 'k', {'target': TARGET, 'message': ''}, db_path=path, rotation_config=CONFIG)
+            row, _ = fixture_create('u', 'c', 'k', {'target': TARGET, 'message': ''}, db_path=path, rotation_config=CONFIG)
             cfg = deepcopy(CONFIG)
             if mode == 'snapshot': cfg['rotation']['templates'].reverse()
             if mode == 'quota':
-                other, _ = ledger_requests.create_request('u', 'other', 'other', {}, db_path=path)
-                ledger_requests.start_transmission(other['request_id'], db_path=path)
+                other, _ = fixture_create('u', 'other', 'other', {}, db_path=path)
+                fixture_start(other['request_id'], db_path=path)
             ws = AsyncMock()
             options = dict(existing_request=row['request_id'], rotation_config=cfg)
             if mode == 'declined': options['confirm_request'] = lambda _: False
             with patch.object(oneshot, 'build_ws_packet', side_effect=ValueError('fixture') if mode == 'pretransmit' else None,
                               return_value=(b'fixture', 1, None)):
-                result = asyncio.run(oneshot._send_target_oneshot(ws, 'u', TARGET, '', db_path=path, **options))
+                result = asyncio.run(fixture_send(ws, 'u', TARGET, '', db_path=path, **options))
             ws.send.assert_not_called()
             code, output = self.result([result])
             self.assertEqual(code, 1)
@@ -98,13 +99,13 @@ class CLIHardeningTests(unittest.TestCase):
     def test_confirmed_replay_never_transmits_and_returns_success(self):
         path = str(Path(self.tmp.name) / 'fixture.db')
         ledger_migrations.initialize(path)
-        row, _ = ledger_requests.create_request('u', 'c', 'k', {'target': TARGET, 'message': 'hello'}, db_path=path)
-        ledger_requests.start_transmission(row['request_id'], db_path=path)
+        row, _ = fixture_create('u', 'c', 'k', {'target': TARGET, 'message': 'hello'}, db_path=path)
+        fixture_start(row['request_id'], db_path=path)
         current = ledger_requests.get_request(row['request_id'], db_path=path)
         ledger_requests.finish('u', 'c', current['date'], row['client_msg_id'], db_path=path,
                                status='confirmed', reason='echo', server_id='123')
         ws = AsyncMock()
-        result = asyncio.run(oneshot._send_target_oneshot(ws, 'u', TARGET, 'hello', db_path=path, idempotency_key='k'))
+        result = asyncio.run(fixture_send(ws, 'u', TARGET, 'hello', db_path=path, idempotency_key='k'))
         ws.send.assert_not_called()
         self.assertEqual(result['existing_status'], 'confirmed')
         self.assertEqual(result['server_msg_id'], '123')

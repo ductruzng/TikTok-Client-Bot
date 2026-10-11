@@ -1,4 +1,5 @@
 """Phase 3B: fixture-only rotation, administration and migration regression tests."""
+from ledger_fixtures import fixture_create, fixture_start, fixture_send
 import asyncio
 from contextlib import closing, redirect_stdout
 from copy import deepcopy
@@ -28,11 +29,11 @@ def race(path, action, barrier, output, data):
     try:
         barrier.wait(timeout=10)
         if action == 'enqueue':
-            requests.create_request('u', 'c', data['key'], {'target': TARGET, 'message': ''}, db_path=path, rotation_config=CONFIG)
+            fixture_create('u', 'c', data['key'], {'target': TARGET, 'message': ''}, db_path=path, rotation_config=CONFIG)
         elif action == 'cancel':
             requests.cancel_request(data['id'], 'race', db_path=path)
         elif action == 'claim':
-            requests.start_transmission(data['id'], db_path=path, rotation_config=CONFIG)
+            fixture_start(data['id'], db_path=path, rotation_config=CONFIG)
         elif action == 'skip':
             requests.skip_selection(('u', 'c', 'daily'), data['preview'], 'race', db_path=path)
         elif action == 'success':
@@ -54,7 +55,7 @@ class RotationTests(unittest.TestCase):
 
     def create(self, cfg=None, uid='u', cid='c', key=None):
         self.n += 1
-        return requests.create_request(uid, cid, key or str(self.n), {'target': dict(TARGET, conv_id=cid), 'message': ''},
+        return fixture_create(uid, cid, key or str(self.n), {'target': dict(TARGET, conv_id=cid), 'message': ''},
             db_path=self.path, rotation_config=cfg or CONFIG)[0]
 
     def state(self):
@@ -62,7 +63,7 @@ class RotationTests(unittest.TestCase):
             return conn.execute('SELECT success_seq,selection_generation FROM rotation_state').fetchall()
 
     def start(self, row, cfg=None):
-        return requests.start_transmission(row['request_id'], db_path=self.path, rotation_config=cfg or CONFIG,
+        return fixture_start(row['request_id'], db_path=self.path, rotation_config=cfg or CONFIG,
             allow_repeat_same_day=True, max_sends_per_conversation_per_day=20, min_send_interval_seconds=0,
             max_sends_per_window=20)
 
@@ -212,7 +213,7 @@ class RotationTests(unittest.TestCase):
         self.finish(row)
         another = self.create()
         with self.assertRaises(requests.RateLimitError):
-            requests.start_transmission(another['request_id'], db_path=self.path, rotation_config=CONFIG)
+            fixture_start(another['request_id'], db_path=self.path, rotation_config=CONFIG)
         self.assertEqual(self.state(), [(1, 0)])
 
     def compete(self, actions):
@@ -317,7 +318,7 @@ class RotationTests(unittest.TestCase):
     def test_claim_requires_current_catalog_even_after_restart(self):
         row = self.create()
         with self.assertRaises(ledger.LedgerError):
-            requests.start_transmission(row['request_id'], db_path=self.path)
+            fixture_start(row['request_id'], db_path=self.path)
         stored = requests.get_request(row['request_id'], db_path=self.path)
         self.assertEqual((stored['status'], stored['transmitted']), ('queued', 0))
 
@@ -394,7 +395,7 @@ class RotationMigrationTests(unittest.TestCase):
                 self.assertEqual(list(conn.iterdump()), dump)
                 self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0], 3)
                 backup = migrations.migrate(path)
-                self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0], 5)
+                self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0], migrations.VERSION)
                 self.assertEqual([r[:16] for r in conn.execute('SELECT * FROM send_requests')], before)
                 self.assertEqual(conn.execute('SELECT * FROM request_events').fetchall(), events)
                 self.assertIsNone(conn.execute('PRAGMA foreign_key_check').fetchone())
@@ -410,7 +411,7 @@ class RotationSendTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = str(Path(tmp) / 'fixture.db')
             migrations.initialize(path)
-            row, _ = requests.create_request('u', 'c', 'key', {'target': TARGET, 'message': ''}, db_path=path, rotation_config=CONFIG)
+            row, _ = fixture_create('u', 'c', 'key', {'target': TARGET, 'message': ''}, db_path=path, rotation_config=CONFIG)
             changed = deepcopy(CONFIG)
             changed['rotation']['templates'][0]['text'] = 'new'
             requests.approve_snapshot(row['request_id'], changed, requests.snapshot_review(row, changed), 'accept old', db_path=path)
@@ -421,7 +422,7 @@ class RotationSendTests(unittest.IsolatedAsyncioTestCase):
                  patch.object(oneshot.LttkClient, '_decompress_lz4_frame', return_value=None), \
                  patch.object(oneshot.LttkClient, 'find_all_msgbodies', return_value=[{}]), \
                  patch.object(oneshot.LttkClient, 'check_echo_correlation', return_value=(True, 'ok', '123')) as echo:
-                result = await oneshot._send_target_oneshot(ws, 'u', TARGET, 'WRONG', db_path=path,
+                result = await fixture_send(ws, 'u', TARGET, 'WRONG', db_path=path,
                     existing_request=row['request_id'], rotation_config=changed)
             self.assertEqual(result['status'], 'confirmed')
             self.assertEqual(packet.call_args.kwargs['text'], exact)
@@ -431,11 +432,11 @@ class RotationSendTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = str(Path(tmp) / 'fixture.db')
             migrations.initialize(path)
-            row, _ = requests.create_request('u', 'c', 'key', {'target': TARGET, 'message': ''}, db_path=path, rotation_config=CONFIG)
+            row, _ = fixture_create('u', 'c', 'key', {'target': TARGET, 'message': ''}, db_path=path, rotation_config=CONFIG)
             changed = deepcopy(CONFIG)
             changed['rotation']['templates'].reverse()
             ws = AsyncMock()
-            result = await oneshot._send_target_oneshot(ws, 'u', TARGET, '', db_path=path,
+            result = await fixture_send(ws, 'u', TARGET, '', db_path=path,
                 existing_request=row['request_id'], rotation_config=changed)
             self.assertEqual(result['reason'], 'snapshot_held')
             ws.send.assert_not_called()

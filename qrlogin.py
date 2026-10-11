@@ -197,27 +197,34 @@ def _validate_session_name(username: str) -> str:
 
 
 def _ensure_session_dir() -> None:
-    if os.path.islink(_SESSION_DIR):
+    from runtime_paths import session_dir
+    directory = str(session_dir(_SESSION_DIR))
+    if os.path.islink(directory):
         raise PermissionError(f"Symlinks are rejected for session directory: {_SESSION_DIR}")
-    os.makedirs(_SESSION_DIR, mode=0o700, exist_ok=True)
+    os.makedirs(directory, mode=0o700, exist_ok=True)
     if hasattr(os, "chmod") and sys.platform != "win32":
-        os.chmod(_SESSION_DIR, 0o700)
+        os.chmod(directory, 0o700)
 
 
 def _get_session_path(username: str) -> str:
     clean_name = _validate_session_name(username)
     _ensure_session_dir()
-    target_path = os.path.abspath(os.path.join(_SESSION_DIR, f"{clean_name}.json"))
-    abs_session_dir = os.path.abspath(_SESSION_DIR)
+    from runtime_paths import session_dir
+    abs_session_dir = str(session_dir(_SESSION_DIR).absolute())
+    target_path = os.path.abspath(os.path.join(abs_session_dir, f"{clean_name}.json"))
     if os.path.commonpath([abs_session_dir, target_path]) != abs_session_dir:
         raise PermissionError(f"Session path escape detected: {target_path}")
     if os.path.islink(target_path):
         raise PermissionError(f"Symlinks are rejected for session files: {target_path}")
+    from runtime_paths import contained
+    contained(target_path, must_exist=False, private=True)
     return target_path
 
 
 def ws_auth_path(username: str) -> str:
-    return os.path.join(_SESSION_DIR, "ws-auth", _validate_session_name(username) + ".json")
+    from runtime_paths import session_dir, contained
+    path = session_dir(_SESSION_DIR) / 'ws-auth' / (_validate_session_name(username) + '.json')
+    return str(contained(path, must_exist=False, private=True))
 
 
 def _write_cookies(cookies: dict, username: str = "_temp") -> str:
@@ -312,10 +319,12 @@ def load_session(username: str) -> dict:
 
 def list_sessions() -> list[str]:
     _ensure_session_dir()
+    from runtime_paths import session_dir
+    directory = str(session_dir(_SESSION_DIR))
     try:
         return [
-            f[:-5] for f in os.listdir(_SESSION_DIR)
-            if f.endswith(".json") and not f.startswith(".") and not os.path.islink(os.path.join(_SESSION_DIR, f))
+            f[:-5] for f in os.listdir(directory)
+            if f.endswith(".json") and not f.startswith(".") and not os.path.islink(os.path.join(directory, f))
         ]
     except (FileNotFoundError, OSError):
         return []

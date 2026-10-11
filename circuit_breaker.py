@@ -162,7 +162,8 @@ def reset(kind, key, preview, reason, *, db_path):
                 raise ledger.LedgerError('Stale circuit preview; review again')
             # Session->UID identity is not guessed. Conservatively block session reset
             # for any unresolved request; account reset uses the exact UID.
-            sql = "SELECT 1 FROM send_requests WHERE status IN ('pending','failed_unknown')"
+            from unknown_resolution import unresolved_sql
+            sql = f"SELECT 1 FROM send_requests r WHERE (r.status='pending' OR {unresolved_sql()})"
             params = ()
             if kind == 'account':
                 sql += ' AND canonical_uid=?'
@@ -180,10 +181,14 @@ def reset(kind, key, preview, reason, *, db_path):
                 VALUES(?,?,?,'RESET',?,'{}',?)''', (kind, key, version, instant, reason))
 
 
-def bind_session(uid, session, *, db_path):
+def bind_session(uid, session, *, db_path, expected_versions=None, reason='SERVER_VERIFIED'):
     """Remember only a server-verified identity, never credentials or config UID."""
     from ledger_requests import transaction
     with transaction(db_path) as conn:
+        if expected_versions is not None:
+            from identity_service import _versions
+            if _versions(conn, session, uid) != expected_versions:
+                raise ledger.LedgerError('STALE_IDENTITY_PREVIEW')
         check(conn, uid, session)
         old = conn.execute("SELECT canonical_uid FROM breaker_state WHERE scope_type='session' AND scope_key=?", (session,)).fetchone()
         if old and old[0] and old[0] != str(uid):
@@ -197,4 +202,4 @@ def bind_session(uid, session, *, db_path):
             version=version+1,updated_at_ms=excluded.updated_at_ms""", (session, instant, instant, str(uid)))
         version = conn.execute("SELECT version FROM breaker_state WHERE scope_type='session' AND scope_key=?", (session,)).fetchone()[0]
         conn.execute("""INSERT INTO breaker_events(scope_type,scope_key,version,event_type,at_ms,evidence_json,reason)
-            VALUES('session',?,?,'IDENTITY_BOUND',?,'{}','SERVER_VERIFIED')""", (session, version, instant))
+            VALUES('session',?,?,'IDENTITY_BOUND',?,'{}',?)""", (session, version, instant, reason))

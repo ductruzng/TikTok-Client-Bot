@@ -46,6 +46,10 @@ def get_own_user_id(cookies: dict | None = None, *, use_cache=True) -> str:
     with urllib.request.urlopen(req, timeout=10) as resp:
         html = resp.read().decode("utf-8", errors="replace")
 
+    if not use_cache:
+        from .self_identity import verify_authenticated_self
+        return verify_authenticated_self(html)
+
     m = re.search(r'"odinId"\s*:\s*"(\d+)"', html)
     if not m:
         from circuit_breaker import ProtocolFailure

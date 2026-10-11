@@ -84,8 +84,11 @@ def transaction(db_path):
         conn.execute('BEGIN IMMEDIATE')
         yield conn
         conn.commit()
-    except BaseException:
+    except BaseException as exc:
         conn.rollback()
+        conn.close()
+        from scheduling import record_hold
+        record_hold(exc, db_path=db_path)
         raise
     finally:
         conn.close()
@@ -96,8 +99,18 @@ def event(conn, request_id, kind, details=None):
                  (request_id, kind, now(), json.dumps(details or {}, sort_keys=True)))
 
 
-def create_request(uid, conv_id, key, payload, *, db_path, client_msg_id=None, rotation_config=None):
+def create_request(uid, conv_id, key, payload, *, db_path, client_msg_id=None, rotation_config=None,
+                   session_name=None, policy_reference=None, policy_config=None):
     """A replay returns the same durable request before evaluating repeat policy."""
+    with transaction(db_path) as conn:
+        return _create_request(conn, uid, conv_id, key, payload, client_msg_id=client_msg_id,
+            rotation_config=rotation_config, session_name=session_name,
+            policy_reference=policy_reference, policy_config=policy_config)
+
+
+def _create_request(conn, uid, conv_id, key, payload, *, client_msg_id=None, rotation_config=None,
+                    session_name=None, policy_reference=None, policy_config=None):
+    """Internal composition helper; caller must own the writer transaction."""
     if not all(isinstance(v, str) and v.strip() for v in (uid, conv_id, key)):
         raise ValueError('uid, conv_id and idempotency key must be nonempty strings')
     if not isinstance(payload, dict):
@@ -105,45 +118,64 @@ def create_request(uid, conv_id, key, payload, *, db_path, client_msg_id=None, r
     encoded = json.dumps(payload, sort_keys=True, separators=(',', ':'), ensure_ascii=False, allow_nan=False)
     cat = rotation.catalog(rotation_config) if rotation_config is not None else None
     intent = rotation.encode({'payload': payload, 'catalog': cat}) if cat else None
-    with transaction(db_path) as conn:
-        previous = conn.execute('SELECT * FROM send_requests WHERE canonical_uid=? AND idempotency_key=?', (uid, key)).fetchone()
-        if previous:
-            same_intent = (previous['intent_json'] == intent if cat or previous['intent_json']
-                           else previous['payload_json'] == encoded)
-            if previous['conv_id'] != conv_id or not same_intent:
-                raise IdempotencyConflict('Idempotency key already belongs to a different payload')
-            return dict(previous), False
-        request_id = secrets.token_hex(16)
-        snapshot, seq, generation = None, None, None
-        if cat:
-            scope = (uid, conv_id, cat['campaign_id'])
-            if conn.execute("SELECT 1 FROM send_requests WHERE canonical_uid=? AND conv_id=? AND campaign_id=? AND status IN ('queued','pending')", scope).fetchone():
-                raise ledger.LedgerError('Rotation scope has an active request; resume or cancel it')
-            conn.execute('INSERT OR IGNORE INTO rotation_state(canonical_uid,conv_id,campaign_id) VALUES(?,?,?)', scope)
-            state = conn.execute('SELECT * FROM rotation_state WHERE canonical_uid=? AND conv_id=? AND campaign_id=?', scope).fetchone()
-            seq, generation = state['success_seq'], state['selection_generation']
-            selected = conn.execute('SELECT snapshot_json FROM send_requests WHERE canonical_uid=? AND conv_id=? AND campaign_id=? AND rotation_seq=? AND selection_generation=? ORDER BY rowid LIMIT 1', (*scope, seq, generation)).fetchone()
-            if selected:
-                snapshot = selected[0]
-            else:
-                last = conn.execute('SELECT snapshot_json FROM send_requests WHERE request_id=?', (state['last_success_request_id'],)).fetchone()
-                template = rotation.choose(cat, json.loads(last[0])['template'] if last else None)
-                snapshot = rotation.encode({'template': template, 'catalog': cat, 'fingerprint': rotation.fingerprint(cat)})
-            payload = dict(payload, message=json.loads(snapshot)['template']['text'])
-            encoded = rotation.encode(payload)
-        conn.execute('''INSERT INTO send_requests(request_id,canonical_uid,conv_id,idempotency_key,payload_json,
-            status,created_at,client_msg_id,campaign_id,rotation_seq,selection_generation,snapshot_json,intent_json)
-            VALUES(?,?,?,?,?,'queued',?,?,?,?,?,?,?)''',
-                     (request_id, uid, conv_id, key, encoded, now(), client_msg_id or str(uuid.uuid4()),
-                      cat['campaign_id'] if cat else None, seq, generation, snapshot, intent))
-        event(conn, request_id, 'CREATED')
-        return dict(conn.execute('SELECT * FROM send_requests WHERE request_id=?', (request_id,)).fetchone()), True
+    previous = conn.execute('SELECT * FROM send_requests WHERE canonical_uid=? AND idempotency_key=?', (uid, key)).fetchone()
+    if previous:
+        check_replay(previous, conv_id, encoded, intent)
+        return dict(previous), False
+    request_id = secrets.token_hex(16)
+    snapshot, seq, generation = None, None, None
+    if cat:
+        scope = (uid, conv_id, cat['campaign_id'])
+        if conn.execute("SELECT 1 FROM send_requests WHERE canonical_uid=? AND conv_id=? AND campaign_id=? AND status IN ('queued','pending')", scope).fetchone():
+            raise ledger.LedgerError('Rotation scope has an active request; resume or cancel it')
+        conn.execute('INSERT OR IGNORE INTO rotation_state(canonical_uid,conv_id,campaign_id) VALUES(?,?,?)', scope)
+        state = conn.execute('SELECT * FROM rotation_state WHERE canonical_uid=? AND conv_id=? AND campaign_id=?', scope).fetchone()
+        seq, generation = state['success_seq'], state['selection_generation']
+        selected = conn.execute('SELECT snapshot_json FROM send_requests WHERE canonical_uid=? AND conv_id=? AND campaign_id=? AND rotation_seq=? AND selection_generation=? ORDER BY rowid LIMIT 1', (*scope, seq, generation)).fetchone()
+        if selected:
+            snapshot = selected[0]
+        else:
+            last = conn.execute('SELECT snapshot_json FROM send_requests WHERE request_id=?', (state['last_success_request_id'],)).fetchone()
+            template = rotation.choose(cat, json.loads(last[0])['template'] if last else None)
+            snapshot = rotation.encode({'template': template, 'catalog': cat, 'fingerprint': rotation.fingerprint(cat)})
+        payload = dict(payload, message=json.loads(snapshot)['template']['text'])
+        encoded = rotation.encode(payload)
+    conn.execute('''INSERT INTO send_requests(request_id,canonical_uid,conv_id,idempotency_key,payload_json,
+        status,created_at,client_msg_id,campaign_id,rotation_seq,selection_generation,snapshot_json,intent_json)
+        VALUES(?,?,?,?,?,'queued',?,?,?,?,?,?,?)''',
+                 (request_id, uid, conv_id, key, encoded, now(), client_msg_id or str(uuid.uuid4()),
+                  cat['campaign_id'] if cat else None, seq, generation, snapshot, intent))
+    from queue_service import insert_entry
+    insert_entry(conn, request_id, uid, session_name, policy_reference, policy_config)
+    event(conn, request_id, 'CREATED')
+    return dict(conn.execute('SELECT * FROM send_requests WHERE request_id=?', (request_id,)).fetchone()), True
+
+
+def check_replay(previous, conv_id, encoded, intent):
+    same = previous['intent_json'] == intent if intent or previous['intent_json'] else previous['payload_json'] == encoded
+    if previous['conv_id'] != conv_id or not same:
+        raise IdempotencyConflict('Idempotency key already belongs to a different payload')
+
+
+def lookup_replay(uid, conv_id, key, payload, *, db_path, rotation_config=None):
+    """Read-only replay lookup before execution gates, credentials or recovery writes."""
+    from contextlib import closing
+    ledger.check_ready(db_path)
+    cat = rotation.catalog(rotation_config) if rotation_config is not None else None
+    intent = rotation.encode({'payload': payload, 'catalog': cat}) if cat else None
+    with closing(ledger._get_readonly_connection(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute('SELECT * FROM send_requests WHERE canonical_uid=? AND idempotency_key=?', (uid, key)).fetchone()
+        if row:
+            check_replay(row, conv_id, rotation.encode(payload), intent)
+        return dict(row) if row else None
 
 
 def start_transmission(request_id, *, db_path, date=None, allow_repeat_same_day=False,
                        max_sends_per_conversation_per_day=1, max_sends_per_account_per_day=20,
                        min_send_interval_seconds=60, max_sends_per_window=5, window_seconds=300,
-                       rotation_config=None, session_name=None):
+                       rotation_config=None, session_name=None, policy_reference=None, policy_config=None,
+                       worker_context=None):
     """Commit the conservative transmission boundary immediately before ws.send."""
     settings = validate_settings(allow_repeat_same_day, max_sends_per_conversation_per_day,
         max_sends_per_account_per_day=max_sends_per_account_per_day,
@@ -155,54 +187,80 @@ def start_transmission(request_id, *, db_path, date=None, allow_repeat_same_day=
             raise ledger.LedgerError('Unknown request')
         if row['status'] != 'queued':
             return False
-        check_snapshot(conn, row, rotation_config)
-        instant = utc_now_ms()
-        local = local_time(instant)
-        day = local.date().isoformat()
-        if date is not None and date != day:
-            raise ValueError('Explicit date must match the transmission clock in Asia/Ho_Chi_Minh')
-        midnight = int((local.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)).timestamp() * 1000)
-        args = (row['canonical_uid'], row['conv_id'])
-        used = conn.execute('SELECT count(*) FROM send_requests WHERE canonical_uid=? AND conv_id=? AND date=? AND transmitted=1', (*args, day)).fetchone()[0]
-        account_used = conn.execute('SELECT count(*) FROM send_requests WHERE canonical_uid=? AND date=? AND transmitted=1', (args[0], day)).fetchone()[0]
-        last = conn.execute('SELECT max(transmission_started_at_ms) FROM send_requests WHERE canonical_uid=? AND transmitted=1', (args[0],)).fetchone()[0]
-        window = [r[0] for r in conn.execute('SELECT transmission_started_at_ms FROM send_requests WHERE canonical_uid=? AND transmitted=1 AND transmission_started_at_ms>? ORDER BY transmission_started_at_ms DESC', (args[0], instant-window_seconds*1000))]
-        reasons = []
-
-        def block(code, scope, usage, limit, retry_at_ms, detail):
-            reasons.append(dict(code=code, scope=scope, used=usage, limit=limit,
-                                retry_at_ms=retry_at_ms,
-                                retry_at=local_time(retry_at_ms).isoformat() if retry_at_ms is not None else None,
-                                detail=detail))
-
-        unknown = conn.execute("SELECT request_id FROM send_requests WHERE canonical_uid=? AND conv_id=? AND status='failed_unknown' LIMIT 1", args).fetchone()
-        limit = max_sends_per_conversation_per_day
-        if unknown:
-            block('UNKNOWN', 'conversation', used, limit, None, f'{unknown[0]} blocks across dates; Owner review required')
-        if used >= limit:
-            block('CONVERSATION_DAILY_LIMIT', 'conversation', used, limit, midnight, 'max_sends_per_conversation_per_day; adjust Settings explicitly to allow more')
-        if account_used >= max_sends_per_account_per_day:
-            block('ACCOUNT_DAILY_LIMIT', 'account', account_used, max_sends_per_account_per_day, midnight, 'max_sends_per_account_per_day')
-        if used and not allow_repeat_same_day:
-            block('REPEAT_DISABLED', 'conversation', used, 1, midnight, 'allow_repeat_same_day=false; a new key does not bypass Settings')
-        if last is not None and instant < last:
-            block('CLOCK_SKEW', 'account', instant, last, None, 'Clock precedes the latest transmission; correct the clock before re-evaluation')
-        if last is not None and instant < last + min_send_interval_seconds*1000:
-            block('MIN_INTERVAL', 'account', max(0, (instant-last)/1000), min_send_interval_seconds,
-                  last + min_send_interval_seconds*1000, 'elapsed seconds / required seconds')
-        if len(window) >= max_sends_per_window:
-            block('SLIDING_WINDOW', 'account', len(window), max_sends_per_window,
-                  window[max_sends_per_window-1] + window_seconds*1000, f'last {window_seconds} seconds')
-        if conn.execute('SELECT 1 FROM crossover_guards WHERE canonical_uid=? AND conv_id=? AND date=?', (*args, day)).fetchone():
-            block('CROSSOVER_GUARD', 'conversation', 1, 1, midnight, 'Midnight crossover guard')
-        if conn.execute("SELECT 1 FROM send_requests WHERE status='pending'").fetchone():
-            block('TRANSMISSION_PENDING', 'database', 1, 1, None, 'concurrency=1; recovery requires the exclusive run lock')
-        if reasons:
-            raise RateLimitError(request_id, reasons)
-        breaker.check(conn, row['canonical_uid'], session_name)
+        if worker_context is not None:
+            from worker import check_authorization
+            check_authorization(conn, row, worker_context, claim=True)
+        instant, day, local = check_admission(conn, row, settings, date=date, rotation_config=rotation_config,
+            session_name=session_name, policy_reference=policy_reference, policy_config=policy_config)
         conn.execute("UPDATE send_requests SET status='pending',date=?,attempt_time=?,transmitted=1,transmission_started_at_ms=? WHERE request_id=?", (day, local.isoformat(), instant, request_id))
         event(conn, request_id, 'TRANSMISSION_STARTED', settings)
         return True
+
+
+def check_admission(conn, row, settings, *, date=None, rotation_config=None,
+                    session_name=None, policy_reference=None, policy_config=None):
+    """Read-only checks; called under the claim's writer transaction or a preview snapshot."""
+    from queue_service import check_claim, check_fifo
+    from unknown_resolution import unresolved_sql
+    from scheduling import check_parent
+    check_parent(conn, row=row, claim=True)
+    check_claim(conn, row, session_name, policy_reference, policy_config)
+    if settings != settings_from_config(policy_config):
+        from queue_service import QueueHeld
+        raise QueueHeld('POLICY_SETTINGS_MISMATCH', 'Claim Settings must match the current explicitly bound policy')
+    check_snapshot(conn, row, rotation_config)
+    allow_repeat_same_day = settings['allow_repeat_same_day']
+    max_sends_per_conversation_per_day = settings['max_sends_per_conversation_per_day']
+    max_sends_per_account_per_day = settings['max_sends_per_account_per_day']
+    min_send_interval_seconds = settings['min_send_interval_seconds']
+    max_sends_per_window = settings['max_sends_per_window']
+    window_seconds = settings['window_seconds']
+    instant = utc_now_ms()
+    local = local_time(instant)
+    day = local.date().isoformat()
+    if date is not None and date != day:
+        raise ValueError('Explicit date must match the transmission clock in Asia/Ho_Chi_Minh')
+    midnight = int((local.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)).timestamp() * 1000)
+    args = (row['canonical_uid'], row['conv_id'])
+    used = conn.execute('SELECT count(*) FROM send_requests WHERE canonical_uid=? AND conv_id=? AND date=? AND transmitted=1', (*args, day)).fetchone()[0]
+    account_used = conn.execute('SELECT count(*) FROM send_requests WHERE canonical_uid=? AND date=? AND transmitted=1', (args[0], day)).fetchone()[0]
+    last = conn.execute('SELECT max(transmission_started_at_ms) FROM send_requests WHERE canonical_uid=? AND transmitted=1', (args[0],)).fetchone()[0]
+    window = [r[0] for r in conn.execute('SELECT transmission_started_at_ms FROM send_requests WHERE canonical_uid=? AND transmitted=1 AND transmission_started_at_ms>? ORDER BY transmission_started_at_ms DESC', (args[0], instant-window_seconds*1000))]
+    reasons = []
+
+    def block(code, scope, usage, limit, retry_at_ms, detail):
+        reasons.append(dict(code=code, scope=scope, used=usage, limit=limit,
+                            retry_at_ms=retry_at_ms,
+                            retry_at=local_time(retry_at_ms).isoformat() if retry_at_ms is not None else None,
+                            detail=detail))
+
+    unknown = conn.execute(f"SELECT r.request_id FROM send_requests r WHERE r.canonical_uid=? AND r.conv_id=? AND {unresolved_sql('r')} LIMIT 1", args).fetchone()
+    limit = max_sends_per_conversation_per_day
+    if unknown:
+        block('UNKNOWN', 'conversation', used, limit, None, f'{unknown[0]} blocks across dates; Owner review required')
+    if used >= limit:
+        block('CONVERSATION_DAILY_LIMIT', 'conversation', used, limit, midnight, 'max_sends_per_conversation_per_day; adjust Settings explicitly to allow more')
+    if account_used >= max_sends_per_account_per_day:
+        block('ACCOUNT_DAILY_LIMIT', 'account', account_used, max_sends_per_account_per_day, midnight, 'max_sends_per_account_per_day')
+    if used and not allow_repeat_same_day:
+        block('REPEAT_DISABLED', 'conversation', used, 1, midnight, 'allow_repeat_same_day=false; a new key does not bypass Settings')
+    if last is not None and instant < last:
+        block('CLOCK_SKEW', 'account', instant, last, None, 'Clock precedes the latest transmission; correct the clock before re-evaluation')
+    if last is not None and instant < last + min_send_interval_seconds*1000:
+        block('MIN_INTERVAL', 'account', max(0, (instant-last)/1000), min_send_interval_seconds,
+              last + min_send_interval_seconds*1000, 'elapsed seconds / required seconds')
+    if len(window) >= max_sends_per_window:
+        block('SLIDING_WINDOW', 'account', len(window), max_sends_per_window,
+              window[max_sends_per_window-1] + window_seconds*1000, f'last {window_seconds} seconds')
+    if conn.execute('SELECT 1 FROM crossover_guards WHERE canonical_uid=? AND conv_id=? AND date=?', (*args, day)).fetchone():
+        block('CROSSOVER_GUARD', 'conversation', 1, 1, midnight, 'Midnight crossover guard')
+    if conn.execute("SELECT 1 FROM send_requests WHERE status='pending'").fetchone():
+        block('TRANSMISSION_PENDING', 'database', 1, 1, None, 'concurrency=1; recovery requires the exclusive run lock')
+    if reasons:
+        raise RateLimitError(row['request_id'], reasons)
+    check_fifo(conn, row)
+    breaker.check(conn, row['canonical_uid'], session_name)
+    return instant, day, local
 
 
 def fail_pretransmit(request_id, *, db_path):
@@ -334,7 +392,8 @@ def _skip_preview(conn, scope):
         raise ledger.LedgerError('No selection to skip')
     if conn.execute("SELECT 1 FROM send_requests WHERE canonical_uid=? AND conv_id=? AND campaign_id=? AND status IN ('queued','pending')", scope).fetchone():
         raise ledger.LedgerError('Cancel queued request first; pending cannot be skipped')
-    if conn.execute("SELECT 1 FROM send_requests WHERE canonical_uid=? AND conv_id=? AND status='failed_unknown'", scope[:2]).fetchone():
+    from unknown_resolution import unresolved_sql
+    if conn.execute(f"SELECT 1 FROM send_requests r WHERE canonical_uid=? AND conv_id=? AND {unresolved_sql()}", scope[:2]).fetchone():
         raise ledger.LedgerError('Unresolved UNKNOWN blocks selection skip')
     row = conn.execute('SELECT request_id,snapshot_json FROM send_requests WHERE canonical_uid=? AND conv_id=? AND campaign_id=? AND rotation_seq=? AND selection_generation=? ORDER BY rowid LIMIT 1',
                        (*scope, state['success_seq'], state['selection_generation'])).fetchone()

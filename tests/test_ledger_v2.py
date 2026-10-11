@@ -1,5 +1,6 @@
 """Phase 2 fixtures only; no credentials, live databases, or TikTok transport."""
 from contextlib import closing
+from ledger_fixtures import fixture_create, fixture_start, fixture_send
 import concurrent.futures
 import json
 import multiprocessing
@@ -19,10 +20,10 @@ from ledger_fixtures import initialize_fixture, start_at, migrate_v2_fixture
 
 
 def race_worker(path, key):
-    row, _ = requests.create_request('u', 'c', key, {'message': 'hello'}, db_path=path)
+    row, _ = fixture_create('u', 'c', key, {'message': 'hello'}, db_path=path)
     try:
         started = start_at(row['request_id'], db_path=path, date='2026-10-09')
-    except ledger.QuotaExceededError:
+    except ledger.LedgerError:
         started = False
     return row['request_id'], started
 
@@ -35,7 +36,7 @@ class LedgerV2Tests(unittest.TestCase):
 
     def create(self, key='key', message='hello', cid='c'):
         initialize_fixture(self.path)
-        return requests.create_request('u', cid, key, {'message': message}, db_path=self.path)[0]
+        return fixture_create('u', cid, key, {'message': message}, db_path=self.path)[0]
 
     def start(self, row, **settings):
         return start_at(row['request_id'], db_path=self.path, date='2026-10-09', **settings)
@@ -116,7 +117,7 @@ class LedgerV2Tests(unittest.TestCase):
         first = self.create()
         self.start(first)
         self.confirm(first)
-        replay, created = requests.create_request('u', 'c', 'key', {'message': 'hello'}, db_path=self.path)
+        replay, created = fixture_create('u', 'c', 'key', {'message': 'hello'}, db_path=self.path)
         self.assertFalse(created)
         self.assertEqual(replay['request_id'], first['request_id'])
         self.assertFalse(self.start(replay, allow_repeat_same_day=True, max_sends_per_conversation_per_day=9))
@@ -208,10 +209,12 @@ class LedgerV2Tests(unittest.TestCase):
                 initialize_fixture(path)
                 script = '''import os, sys
 import ledger, ledger_requests as r
+sys.path.insert(0, 'tests')
+from ledger_fixtures import fixture_create, fixture_start
 p, boundary = sys.argv[1:]
-row, _ = r.create_request('u','c','key',{'message':'hello'},db_path=p)
+row, _ = fixture_create('u','c','key',{'message':'hello'},db_path=p)
 if boundary == 'committed':
-    r.start_transmission(row['request_id'],db_path=p)
+    fixture_start(row['request_id'],db_path=p)
 elif boundary == 'uncommitted':
     conn=ledger._get_readwrite_connection(p)
     conn.execute('BEGIN IMMEDIATE')
@@ -273,19 +276,19 @@ class SendV2Integration(unittest.IsolatedAsyncioTestCase):
                                                   client_msg_id=client_id, text='hello')
                 ws = MockWebSocket(incoming_frames=[echo])
                 with patch('oneshot.uuid.uuid4', return_value=client_id):
-                    result = await oneshot._send_target_oneshot(ws, '111', target, 'hello', db_path=path,
+                    result = await fixture_send(ws, '111', target, 'hello', db_path=path,
                         idempotency_key=f'key-{index}', allow_repeat_same_day=True,
                         max_sends_per_conversation_per_day=2, min_send_interval_seconds=0)
                 self.assertEqual(result['status'], 'confirmed')
                 self.assertEqual(len(ws.sent_packets), 1)
             ws = MockWebSocket()
-            result = await oneshot._send_target_oneshot(ws, '111', target, 'hello', db_path=path,
+            result = await fixture_send(ws, '111', target, 'hello', db_path=path,
                 idempotency_key='key-2', allow_repeat_same_day=True, max_sends_per_conversation_per_day=2, min_send_interval_seconds=0)
             self.assertEqual(result['reason'], 'already_confirmed')
             with self.assertRaises(requests.IdempotencyConflict):
-                await oneshot._send_target_oneshot(ws, '111', target, 'different', db_path=path,
+                await fixture_send(ws, '111', target, 'different', db_path=path,
                                                   idempotency_key='key-2')
-            result = await oneshot._send_target_oneshot(ws, '111', target, 'hello', db_path=path,
+            result = await fixture_send(ws, '111', target, 'hello', db_path=path,
                 idempotency_key='key-3', allow_repeat_same_day=True, max_sends_per_conversation_per_day=2, min_send_interval_seconds=0)
             self.assertIn('2/2', result['detail'])
             self.assertEqual(ws.sent_packets, [])
@@ -298,7 +301,7 @@ class SendV2Integration(unittest.IsolatedAsyncioTestCase):
             initialize_fixture(path)
             ws = MockWebSocket()
             with patch.object(oneshot, 'build_ws_packet', side_effect=ValueError('synthetic')):
-                result = await oneshot._send_target_oneshot(ws, '111',
+                result = await fixture_send(ws, '111',
                     {'conv_id': 'c', 'conv_short_id': 1, 'conv_type': 1}, 'hello', db_path=path)
             self.assertEqual(result['status'], 'failed_pretransmit')
             self.assertEqual(ws.sent_packets, [])

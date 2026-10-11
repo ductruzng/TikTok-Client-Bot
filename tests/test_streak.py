@@ -1,3 +1,4 @@
+from ledger_fixtures import fixture_create, fixture_start, fixture_send
 import asyncio
 import concurrent.futures
 import json
@@ -22,7 +23,8 @@ from ledger_fixtures import reserve_at, initialize_fixture
 import log
 from core.proto import _build_msg_body, build_ws_packet, f_varint, f_str, f_bytes, encode_varint
 from client import LttkClient
-from oneshot import validate_config_data, _send_target_oneshot
+from oneshot import validate_config_data
+from ledger_fixtures import fixture_send as _send_target_oneshot
 
 
 class TestCliDryRun(unittest.TestCase):
@@ -215,6 +217,11 @@ class TestPersistentLedgerDedupe(unittest.TestCase):
         with self.assertRaises(ledger.QuotaExceededError):
             reserve_at(uid, "conv_888", "uuid-blocked", date=date, db_path=self.db_path)
         ledger.confirm_send(uid, cid, date, uuid1, server_msg_id="10001", confirm_date=date, db_path=self.db_path)
+        # 3D preserves blocked queued requests; explicitly retire them before a new key.
+        import queue_service, ledger_requests
+        for row in queue_service.list_queue(db_path=self.db_path):
+            if row['status'] == 'queued':
+                ledger_requests.cancel_request(row['request_id'], 'retire blocked fixture request', db_path=self.db_path)
         res2 = reserve_at(uid, "conv_888", "uuid-claim-3", date=date, db_path=self.db_path)
         self.assertEqual(res2, date)
         ledger.confirm_send(uid, "conv_888", date, "uuid-claim-3", server_msg_id="10002", confirm_date=date, db_path=self.db_path)
@@ -249,9 +256,9 @@ class TestPersistentLedgerDedupe(unittest.TestCase):
 
         def _claim_worker(idx):
             try:
-                ledger.reserve_pending(uid, cid, f"uuid-worker-{idx}", date=date, db_path=self.db_path)
+                reserve_at(uid, cid, f"uuid-worker-{idx}", date=date, db_path=self.db_path)
                 return "success"
-            except ledger.QuotaExceededError:
+            except ledger.LedgerError:
                 return "quota_exceeded"
 
         with patch("ledger_requests.utc_now_ms", return_value=1791435600000), concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
@@ -637,6 +644,9 @@ class MockWebSocket:
         if isinstance(frame, Exception):
             raise frame
         return frame
+
+    async def close(self):
+        pass
 
 
 def _build_synthetic_echo_frame(

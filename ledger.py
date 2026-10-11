@@ -45,7 +45,7 @@ ALLOWED_REASON_CODES = {
 }
 
 _REPO_DIR = os.path.dirname(os.path.abspath(__file__))
-_DEFAULT_STATE_DIR = os.path.join(_REPO_DIR, "state")
+_DEFAULT_STATE_DIR = os.path.join(os.environ.get('TIKTOK_RUNTIME_DIR', _REPO_DIR), "state")
 _DEFAULT_LEDGER_PATH = os.path.join(_DEFAULT_STATE_DIR, "streak_ledger.db")
 _DEFAULT_LOCK_PATH = os.path.join(_DEFAULT_STATE_DIR, "run.lock")
 
@@ -131,7 +131,9 @@ def _init_db(conn: sqlite3.Connection) -> None:
 
 
 def _get_readwrite_connection(db_path: str = _DEFAULT_LEDGER_PATH) -> sqlite3.Connection:
-    """Open an existing V5 database; sending never initializes or migrates."""
+    """Open an existing current-schema database; sending never initializes or migrates."""
+    from runtime_paths import contained
+    contained(db_path, private=True)
     if not os.path.isfile(db_path) or os.path.islink(db_path):
         raise LedgerError("Ledger missing or unsafe; explicit ledger-initialize is required")
     conn = sqlite3.connect(Path(db_path).absolute().as_uri() + "?mode=rw", uri=True,
@@ -171,6 +173,8 @@ def _get_readonly_connection(db_path: str = _DEFAULT_LEDGER_PATH) -> Optional[sq
 
     Returns None if the database file does not exist.
     """
+    from runtime_paths import contained
+    contained(db_path, must_exist=False, private=True)
     if not os.path.exists(db_path):
         return None
     if os.path.islink(db_path):
@@ -204,7 +208,7 @@ def is_already_attempted(
 
     try:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        if version in (2, 3, 4, 5):
+        if version in (2, 3, 4, 5, 6, 7, 8):
             row = conn.execute("SELECT status FROM send_requests WHERE canonical_uid=? AND conv_id=? AND date=? AND transmitted=1 ORDER BY attempt_time DESC LIMIT 1",
                                (str(canonical_uid), str(conv_id), str(date))).fetchone()
             if row:

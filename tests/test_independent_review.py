@@ -1,4 +1,5 @@
 """Reviewer regressions; no accounts, credentials, or external network."""
+from ledger_fixtures import fixture_create, fixture_start, fixture_send
 import contextlib
 import asyncio
 import io
@@ -95,6 +96,7 @@ class IndependentReview(unittest.TestCase):
         send_target = AsyncMock()
         with tempfile.TemporaryDirectory() as tmp:
             initialize_fixture(str(Path(tmp) / "ledger.db"))
+            __import__("circuit_breaker").bind_session("111", "fake", db_path=str(Path(tmp) / "ledger.db"))
             plan = Path(tmp) / "plan.json"
             plan.write_text(json.dumps({"session": "fake", "message": "hi",
                                         "targets": [{"conv_id": "0:1:1:2", "conv_short_id": 7, "conv_type": 1}]}),
@@ -372,8 +374,8 @@ class IndependentSendReview(unittest.IsolatedAsyncioTestCase):
                     patch.object(ledger, "get_current_ho_chi_minh_date", return_value="2026-10-08"), \
                     patch("ledger_requests.utc_now_ms", return_value=1791435600000), \
                     contextlib.redirect_stdout(output):
-                result = await oneshot._send_target_oneshot(ws, "111", target, "hi", timeout_seconds=0.1, db_path=db)
-                repeat = await oneshot._send_target_oneshot(ws, "111", target, "hi", timeout_seconds=0.1, db_path=db)
+                result = await fixture_send(ws, "111", target, "hi", timeout_seconds=0.1, db_path=db)
+                repeat = await fixture_send(ws, "111", target, "hi", timeout_seconds=0.1, db_path=db)
             self.assertEqual(ws.sends, 1)
             self.assertEqual(repeat["status"], "skipped")
             self.assertNotIn("never-log-this-value", output.getvalue())

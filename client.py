@@ -25,6 +25,10 @@ except ImportError:
 _USER_CACHE_TTL = 60
 
 
+class UnsupportedSafetyOperation(RuntimeError):
+    """Legacy mutation APIs are retained but cannot bypass managed text sending."""
+
+
 _RE_ACCESS_KEY = re.compile(r"^[0-9a-f]{32}$")
 _RE_TTWID = re.compile(r"^1\|[A-Za-z0-9_-]+\|\d+\|[0-9a-f]+$")
 
@@ -40,6 +44,10 @@ def load_ws_auth(path: str | None = None, *, session_name: str | None = None, co
     if session_name is not None:
         from qrlogin import ws_auth_path
         path = ws_auth_path(session_name)
+    else:
+        import runtime_paths
+        if runtime_paths.root() is not None:
+            raise ValueError('Explicit session-bound WS auth required with runtime root')
     path = path or os.path.join(os.path.dirname(os.path.abspath(__file__)), config.WS_AUTH_FILE)
     if os.path.islink(path) or os.path.islink(os.path.dirname(os.path.abspath(path))):
         raise PermissionError("Symlinks are rejected for WS credentials")
@@ -51,6 +59,12 @@ def load_ws_auth(path: str | None = None, *, session_name: str | None = None, co
     fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     with os.fdopen(fd, "r", encoding="utf-8-sig") as f:
         data = json.load(f)
+    return validate_ws_auth(data, session_name=session_name, cookies=cookies)
+
+
+def validate_ws_auth(data, *, session_name=None, cookies=None):
+    """Pure validation shared by real loading and non-mutating preflight."""
+    import urllib.parse
     if not isinstance(data, dict):
         raise ValueError(f"{config.WS_AUTH_FILE} must contain a JSON object")
     if session_name is not None:
@@ -459,6 +473,7 @@ class LttkClient:
                            *, msg: dict | None = None, awe_type: int | None = None,
                            conv_type: int | None = None,
                            client_id: str | None = None) -> tuple[int, str]:
+        raise UnsupportedSafetyOperation('Legacy send_message is unsupported by the Safety Layer; use services.send_plan or the managed queue')
         is_group = False
         if msg is not None:
             if not conv_id:
@@ -492,6 +507,7 @@ class LttkClient:
         return msg_type, actual_client_id
 
     async def send_video(self, conv_id: str, item_id: str, short_id: int = 1) -> int:
+        raise UnsupportedSafetyOperation('Video sending is unsupported by the Safety Layer')
         detail = await asyncio.get_event_loop().run_in_executor(None, get_item_detail, item_id)
         packet, msg_type = build_video_share_packet(
             conv_id        = conv_id,
@@ -508,6 +524,7 @@ class LttkClient:
     async def send_reaction(self, conv_id: str = "", msg_type: int = 0,
                             sender_id: str = "", emoji: str = "❤️",
                             short_id: int = 1, *, msg: dict | None = None):
+        raise UnsupportedSafetyOperation('Reaction sending is unsupported by the Safety Layer')
         if msg is not None:
             if not conv_id:   conv_id   = msg["conv_id"]
             if not msg_type:  msg_type  = msg["msg_type"]
@@ -527,6 +544,7 @@ class LttkClient:
 
     async def delete_message(self, conv_id: str = "", msg_type: int = 0,
                              short_id: int = 1, *, msg: dict | None = None):
+        raise UnsupportedSafetyOperation('Message deletion is unsupported by the Safety Layer')
         if msg is not None:
             if not conv_id:  conv_id  = msg["conv_id"]
             if not msg_type: msg_type = msg["msg_type"]
@@ -543,6 +561,7 @@ class LttkClient:
 
     async def delete_message_everyone(self, conv_id: str = "", msg_type: int = 0,
                                       msg_id: int = 0, *, msg: dict | None = None):
+        raise UnsupportedSafetyOperation('Message deletion for everyone is unsupported by the Safety Layer')
         if msg is not None:
             if not conv_id:  conv_id  = msg["conv_id"]
             if not msg_type: msg_type = msg["msg_type"]
@@ -561,6 +580,7 @@ class LttkClient:
     async def remove_reaction(self, conv_id: str = "", msg_type: int = 0,
                               sender_id: str = "", emoji: str = "❤️",
                               short_id: int = 1, *, msg: dict | None = None):
+        raise UnsupportedSafetyOperation('Reaction removal is unsupported by the Safety Layer')
         if msg is not None:
             if not conv_id:   conv_id   = msg["conv_id"]
             if not msg_type:  msg_type  = msg["msg_type"]
@@ -1538,9 +1558,9 @@ class LttkClient:
             _log.warn("lttk", f"error al cerrar sesion en TikTok ({e})")
 
         if self._active_session:
-            from .qrlogin import _SESSION_DIR
+            from .qrlogin import _get_session_path
             import os
-            path = os.path.join(_SESSION_DIR, f"{self._active_session}.json")
+            path = _get_session_path(self._active_session)
             try:
                 os.remove(path)
                 _log.ok("lttk", f"credencial eliminada: {self._active_session}.json")
@@ -1586,6 +1606,7 @@ class LttkClient:
         return False
 
     async def run(self):
+        raise UnsupportedSafetyOperation('Legacy client.run is unsupported by the Safety Layer; use managed text CLI/services')
         if not self._cookies.get("sessionid"):
             if not self._load_session():
                 _log.warn("lttk", "no hay sesion, iniciando login por QR...")

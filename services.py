@@ -15,11 +15,57 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parent
-CONFIG_PATH = ROOT / "streak.local.json"
-PREFS_PATH = ROOT / "work" / "tui-settings.local.json"
+_RUNTIME_BASE = Path(os.environ.get('TIKTOK_RUNTIME_DIR', str(ROOT)))
+CONFIG_PATH = _RUNTIME_BASE / "streak.local.json"
+PREFS_PATH = _RUNTIME_BASE / "work" / "tui-settings.local.json"
 SESSION_DIR = ROOT / "sesion"  # spelling used by the upstream project
 SESSION_PATTERN = re.compile(r"^[a-zA-Z0-9_.-]+$")
 TIME_PATTERN = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+
+
+def runtime_preflight(runtime_dir, db_path, config_path, *, check_credentials=False):
+    from readiness import report
+    return report(runtime_dir, db_path, config_path, check_credentials=check_credentials)
+
+
+def identity_preview(session, *, db_path):
+    from identity_service import preview
+    return preview(session, db_path=db_path)
+
+
+def schedule_preview(config_path, schedule_id, *, db_path, **bounds):
+    from scheduling import preview
+    return preview(config_path, schedule_id, db_path=db_path, **bounds)
+
+
+def schedule_authorize(review, reason, *, db_path):
+    from scheduling import authorize
+    return authorize(review, reason, db_path=db_path)
+
+
+def schedule_status(grant_id, *, db_path):
+    from scheduling import status
+    return status(grant_id, db_path=db_path)
+
+
+def schedule_change(grant_id, preview, action, reason, *, db_path):
+    from scheduling import change
+    return change(grant_id, preview, action, reason, db_path=db_path)
+
+
+async def schedule_tick(grant_id, fingerprint=None, *, db_path, **options):
+    from scheduling import tick
+    return await tick(grant_id, fingerprint, db_path=db_path, **options)
+
+
+def identity_verify(session, *, db_path):
+    from identity_service import verify
+    return verify(session, db_path=db_path)
+
+
+def identity_apply(review, reason, *, db_path):
+    from identity_service import apply
+    return apply(review, reason, db_path=db_path)
 
 
 @dataclass(frozen=True)
@@ -47,7 +93,9 @@ def valid_session_name(name: str) -> bool:
     )
 
 
-def list_sessions(directory: Path = SESSION_DIR) -> list[str]:
+def list_sessions(directory: Path = None) -> list[str]:
+    from runtime_paths import session_dir, contained
+    directory = contained(directory) if directory is not None else session_dir(SESSION_DIR)
     if not directory.is_dir():
         return []
     return sorted(
@@ -59,6 +107,8 @@ def list_sessions(directory: Path = SESSION_DIR) -> list[str]:
 
 
 def read_json_object(path: Path) -> dict[str, Any]:
+    from runtime_paths import contained
+    contained(path, must_exist=False, private=True)
     if not path.exists():
         return {}
     value = json.loads(path.read_text(encoding="utf-8-sig"))
@@ -69,6 +119,8 @@ def read_json_object(path: Path) -> dict[str, Any]:
 
 def atomic_write_json(path: Path, value: dict[str, Any]) -> None:
     """Do not corrupt the existing JSON on an interrupted write."""
+    from runtime_paths import contained
+    contained(path, must_exist=False, private=True)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(prefix=".tui-", suffix=".tmp", dir=path.parent)
     try:
@@ -315,3 +367,96 @@ def breaker_status(*, db_path, account=None, session=None, history=False):
 def breaker_reset(scope_type, scope_key, preview, reason, *, db_path):
     import circuit_breaker
     return circuit_breaker.reset(scope_type, scope_key, preview, reason, db_path=db_path)
+
+
+def queue_enqueue(config_path, key, *, db_path, apply=False):
+    import queue_service
+    cfg = queue_service.read_policy(config_path)
+    uid = queue_service.verified_uid(cfg['session'], db_path=db_path)
+    if not apply:
+        return {'preview_only': True, 'account': uid, 'session': cfg['session'], 'config': cfg,
+                'warning': 'Template selection is committed only on explicit enqueue; no message sent'}
+    return queue_service.enqueue(cfg, config_path, key, db_path=db_path)
+
+
+def queue_list(*, db_path, session=None):
+    from queue_service import list_queue
+    return list_queue(db_path=db_path, session=session)
+
+
+def queue_run_preview(*, db_path, session):
+    from queue_service import preview_run
+    return preview_run(db_path=db_path, session=session)
+
+
+async def queue_run_once(*, db_path, session, max_jobs=1, confirm_request=None):
+    from queue_service import run_once
+    return await run_once(db_path=db_path, session=session, max_jobs=max_jobs, confirm_request=confirm_request)
+
+
+def queue_bind_preview(request_id, config_path, *, db_path):
+    import queue_service
+    return queue_service.preview_bind(request_id, queue_service.read_policy(config_path), config_path, db_path=db_path)
+
+
+def queue_bind(request_id, config_path, preview, reason, *, db_path):
+    import queue_service
+    return queue_service.bind_request(request_id, queue_service.read_policy(config_path), config_path, preview, reason, db_path=db_path)
+
+
+def unknown_preview(request_id, *, db_path):
+    from unknown_resolution import preview
+    result = preview(request_id, db_path=db_path)
+    route = result['route']
+    if route['policy_reference']:
+        import queue_service
+        from ledger_requests import settings_from_config
+        try:
+            cfg = queue_service.read_policy(route['policy_reference'])
+            result['current_settings'] = settings_from_config(cfg)
+            result['quota_warning'] = 'UNKNOWN retains its transmission quota; repeat/limits/cooldown/circuits can hold any replacement'
+        except (OSError, ValueError):
+            result['policy_warning'] = 'Policy unavailable/invalid; replacement cannot execute before review'
+    return result
+
+
+def unknown_resolve(request_id, action, preview, reason, evidence, *, db_path):
+    from unknown_resolution import resolve
+    # Display-only policy diagnostics do not replace the transactional decision preview.
+    core = {k: v for k, v in preview.items() if k not in ('current_settings', 'quota_warning', 'policy_warning')}
+    return resolve(request_id, action, core, reason, evidence, db_path=db_path)
+
+
+def worker_preview(session, ids, *, db_path, **bounds):
+    from worker import preview
+    return preview(session, ids, db_path=db_path, **bounds)
+
+
+def worker_authorize(preview, reason, *, db_path):
+    from worker import authorize
+    return authorize(preview, reason, db_path=db_path)
+
+
+def worker_status(run_id, *, db_path):
+    from worker import status
+    return status(run_id, db_path=db_path)
+
+
+def worker_revoke(run_id, preview, reason, *, db_path):
+    from worker import revoke
+    return revoke(run_id, preview, reason, db_path=db_path)
+
+
+async def worker_run(run_id, fingerprint, *, db_path, stop_event=None):
+    from worker import run
+    return await run(run_id, fingerprint, db_path=db_path, stop_event=stop_event)
+
+
+def operational_status(grant_id, *, db_path):
+    from operations import status
+    return status(grant_id, db_path=db_path)
+
+
+def ledger_backup(db_path, destination):
+    from operations import backup
+    return backup(db_path, destination)

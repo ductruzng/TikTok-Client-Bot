@@ -13,6 +13,13 @@ protected = [ROOT / p for p in (
     '.uid_cache.json', 'work/tiktok-browser-profile', 'work/ws_auth.candidate.local.json',
     'work/tui-settings.local.json',
 )]
+if __name__ == '__main__':
+    # Spawned test children inherit the original protected root, not a test's
+    # temporary TIKTOK_RUNTIME_DIR override.
+    os.environ['TIKTOK_REVIEW_PROTECTED_RUNTIME'] = os.environ.get('TIKTOK_RUNTIME_DIR', '')
+protected_runtime = os.environ.get('TIKTOK_REVIEW_PROTECTED_RUNTIME', os.environ.get('TIKTOK_RUNTIME_DIR', ''))
+if protected_runtime:
+    protected.append(Path(protected_runtime).absolute())
 
 def guard(event, args):
     if event == 'socket.getaddrinfo':

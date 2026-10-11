@@ -1,4 +1,5 @@
 """Offline circuit tests. All databases are disposable and transports synthetic."""
+from ledger_fixtures import fixture_create, fixture_start, fixture_send
 import asyncio
 import contextlib
 import io
@@ -27,7 +28,7 @@ def compete(path, rid, action, ready, go, output):
         if action == 'trip':
             cb.record_failure(cb.Failure('NETWORK', 'handshake', 'transport'), db_path=path, uid='111')
         else:
-            requests.start_transmission(rid, db_path=path, min_send_interval_seconds=0)
+            fixture_start(rid, db_path=path, min_send_interval_seconds=0)
         output.put(action)
     except cb.CircuitOpen:
         output.put('blocked')
@@ -45,10 +46,10 @@ class CircuitTests(unittest.TestCase):
             return conn.execute(sql, params).fetchall()
 
     def request(self, key='key', conv='c', uid='111'):
-        return requests.create_request(uid, conv, key, {'message': 'hello'}, db_path=self.path)[0]
+        return fixture_create(uid, conv, key, {'message': 'hello'}, db_path=self.path)[0]
 
     def start(self, row):
-        return requests.start_transmission(row['request_id'], db_path=self.path, min_send_interval_seconds=0)
+        return fixture_start(row['request_id'], db_path=self.path, min_send_interval_seconds=0)
 
     def finish(self, row, status='failed_unknown'):
         stored = requests.get_request(row['request_id'], db_path=self.path)
@@ -136,7 +137,7 @@ class CircuitTests(unittest.TestCase):
 
     def test_replay_and_pretransmit_failure_unchanged(self):
         row=self.request(); requests.fail_pretransmit(row['request_id'],db_path=self.path)
-        replay,created=requests.create_request('111','c','key',{'message':'hello'},db_path=self.path)
+        replay,created=fixture_create('111','c','key',{'message':'hello'},db_path=self.path)
         self.assertFalse(created); self.assertEqual(row['request_id'],replay['request_id'])
         self.assertEqual(cb.inspect(db_path=self.path,uid='111'),[])
         self.assertEqual(self.query('SELECT sum(transmitted) FROM send_requests'),[(0,)])
@@ -188,7 +189,7 @@ class MigrationTests(unittest.TestCase):
                 self.assertEqual(list(conn.iterdump()),before)
                 backup=migrations.migrate(path)
                 self.assertEqual(conn.execute('SELECT * FROM send_requests').fetchall(),rows)
-                self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0],5)
+                self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0],migrations.VERSION)
                 self.assertIsNone(migrations.migrate(path))
                 events=cb.inspect(db_path=path,uid='111',history=True)
                 self.assertEqual(events[0]['source_request_id'],'0')
@@ -201,7 +202,7 @@ class MigrationTests(unittest.TestCase):
 
 class TransportTests(unittest.IsolatedAsyncioTestCase):
     async def test_message_keywords_are_not_restrictions(self):
-        from oneshot import _send_target_oneshot
+        from ledger_fixtures import fixture_send as _send_target_oneshot
         with tempfile.TemporaryDirectory() as tmp:
             path=str(Path(tmp)/'db'); migrations.initialize(path)
             target={'conv_id':'0:1:111:222','conv_short_id':7,'conv_type':1}
@@ -213,7 +214,7 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(cb.inspect(db_path=path,uid='111'),[])
 
     async def test_send_failure_opens_and_preserves_marker(self):
-        from oneshot import _send_target_oneshot
+        from ledger_fixtures import fixture_send as _send_target_oneshot
         with tempfile.TemporaryDirectory() as tmp:
             path=str(Path(tmp)/'db'); migrations.initialize(path)
             result=await _send_target_oneshot(MockWebSocket(send_exc=ConnectionResetError()),'111',
@@ -242,6 +243,7 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
                  'templates':[{'id':'a','text':'hello'},{'id':'b','text':'world'}]},
                  'targets':[{'conv_id':c,'conv_short_id':7,'conv_type':1} for c in ('c','d')]}
             plan=Path(tmp)/'plan.json'; plan.write_text(json.dumps(cfg))
+            cb.bind_session('111', 's', db_path=path)
             ws=Connection()
             with patch.object(oneshot,'load_session',return_value={'sessionid':'fixture'}), \
                  patch.object(oneshot,'get_own_user_id',return_value='111'), \
@@ -259,14 +261,15 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path=str(Path(tmp)/'db'); migrations.initialize(path)
             plan=Path(tmp)/'plan.json';plan.write_text(json.dumps({'session':'s','message':'hi','targets':[{'conv_id':'c','conv_short_id':7,'conv_type':1}]}))
+            cb.bind_session('111', 's', db_path=path)
             with patch.object(oneshot,'load_session',return_value={'sessionid':'fixture'}), \
                  patch.object(oneshot,'get_own_user_id',side_effect=HTTPError('https://invalid',401,'SECRET',{},None)) as identity:
                 for _ in range(2):
                     with self.assertRaises(cb.CircuitOpen): await oneshot.run_oneshot_send(str(plan),db_path=path)
                 identity.assert_called_once()
-            self.assertEqual(cb.inspect(db_path=path,session='s')[0]['category'],'AUTH')
+            self.assertEqual(cb.inspect(db_path=path,uid='111')[0]['category'],'AUTH')
             with contextlib.closing(sqlite3.connect(path)) as conn:
-                self.assertEqual(conn.execute('SELECT count(*) FROM send_requests').fetchone()[0],0)
+                self.assertEqual(conn.execute('SELECT count(*) FROM send_requests').fetchone()[0],1)
 
     async def test_decoder_unknown_text_and_corrupt_bytes_never_confirm(self):
         from client import LttkClient
@@ -275,7 +278,7 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
 
 
     async def test_cancelled_transport_records_unknown_atomically(self):
-        from oneshot import _send_target_oneshot
+        from ledger_fixtures import fixture_send as _send_target_oneshot
         with tempfile.TemporaryDirectory() as tmp:
             path=str(Path(tmp)/'db'); migrations.initialize(path)
             with self.assertRaises(asyncio.CancelledError):
@@ -290,7 +293,7 @@ class IdentityCacheTests(unittest.TestCase):
     def test_fresh_identity_never_opens_cache_on_success_or_parse_failure(self):
         from core import api
         from unittest.mock import MagicMock
-        for body,valid in [(b'{"odinId":"111"}',True),(b'no identity',False)]:
+        for body,valid in [(b'{"odinId":"111"}',False),(b'no identity',False)]:
             with self.subTest(valid=valid):
                 response=MagicMock()
                 response.__enter__.return_value.read.return_value=body

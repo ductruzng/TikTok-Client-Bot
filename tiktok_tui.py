@@ -268,7 +268,6 @@ class TikTokTUI(App):
         self.loaded_for: str | None = None
         self._initialized = False
         self._fetching = False
-        self._last_run_time = ""
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -289,21 +288,21 @@ class TikTokTUI(App):
                 yield Input(placeholder="Nhập nội dung tin nhắn gửi...", id="message")
 
                 # Section 3: Schedule & Policies
-                yield Static("⏰ Cài đặt lịch gửi hàng ngày:", classes="section-label")
+                yield Static("⏰ Giờ tham khảo cho lịch CLI:", classes="section-label")
                 with Horizontal(id="time-row"):
                     yield Static("Giờ gửi (HH:MM):", id="time-label")
                     yield Input(value="08:00", id="send-time")
                 
                 with Horizontal(classes="switch-row"):
-                    yield Static("Bật Scheduler tự động:", classes="switch-text")
-                    yield Switch(value=False, id="enable-schedule")
+                    yield Static("Scheduler TUI đã vô hiệu hóa. Lịch CLI cần recurring consent.", classes="switch-text")
+                    yield Switch(value=False, disabled=True, id="enable-schedule")
 
                 with Horizontal(classes="switch-row"):
                     yield Static("Bỏ qua nếu đã gửi hôm nay:", classes="switch-text")
                     yield Switch(value=True, id="skip-sent")
 
                 # Section 4: Action Buttons
-                yield Button("💾 LƯU CẤU HÌNH & LỊCH", id="save-all", variant="primary")
+                yield Button("💾 LƯU CẤU HÌNH", id="save-all", variant="primary")
                 with Horizontal(classes="action-row"):
                     yield Button("⚡ GỬI NGAY", id="send-now", variant="success", classes="half-btn")
                     yield Button("🧪 DRY-RUN", id="dryrun", variant="default", classes="half-btn")
@@ -336,25 +335,6 @@ class TikTokTUI(App):
         self.refresh_sessions(initial=True)
         self._initialized = True
         self._activity("🚀 TikTok Streak Manager v0.3 Dashboard đã sẵn sàng.")
-        self.set_interval(60.0, self._check_schedule)
-
-    def _check_schedule(self) -> None:
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
-        from services import scheduled_run_key
-        try:
-            prefs = read_json_object(PREFS_PATH)
-            key = scheduled_run_key(
-                prefs,
-                datetime.now(ZoneInfo("Asia/Ho_Chi_Minh")),
-                self._last_run_time,
-            )
-        except (OSError, ValueError):
-            return
-        if key:
-            self._last_run_time = key
-            self._activity(f"[Scheduler] ⏰ Đã đến giờ gửi tin tự động ({prefs.get('time')}). Khởi chạy tiến trình...")
-            self._run_send("Scheduler")
 
     def _activity(self, text: str) -> None:
         self.query_one("#activity", RichLog).write(text)
@@ -382,7 +362,7 @@ class TikTokTUI(App):
                 self.query_one("#message", Input).value = str(saved.get("message", ""))
                 prefs = read_json_object(PREFS_PATH)
                 self.query_one("#send-time", Input).value = str(prefs.get("time", "08:00"))
-                self.query_one("#enable-schedule", Switch).value = bool(prefs.get("enabled", False))
+                self.query_one("#enable-schedule", Switch).value = False
                 self.query_one("#skip-sent", Switch).value = not bool(read_json_object(CONFIG_PATH).get("allow_repeat_same_day", False))
             self._update_summary()
             if not initial:
@@ -393,17 +373,13 @@ class TikTokTUI(App):
     def _update_summary(self) -> None:
         try:
             config = self._saved_plan()
-            prefs = read_json_object(PREFS_PATH)
         except (OSError, ValueError):
             config = {}
-            prefs = {}
-        
-        status = "BẬT" if prefs.get("enabled") else "TẮT"
         account_name = self._session() or "(Chưa chọn)"
         targets_count = len(config.get('targets', [])) if isinstance(config.get('targets'), list) else 0
         
         self.query_one("#info", Static).update(
-            f"Tài khoản: {account_name}\nĐã lưu: {targets_count} người nhận | Scheduler: {status}"
+            f"Tài khoản: {account_name}\nĐã lưu: {targets_count} người nhận | Scheduler TUI: VÔ HIỆU HÓA; lịch qua CLI cần recurring consent."
         )
 
         visible_count = len(self._visible()) if self.loaded_for == self._session() else 0
@@ -517,15 +493,13 @@ class TikTokTUI(App):
             return
 
         send_time = self.query_one("#send-time", Input).value.strip()
-        enabled = self.query_one("#enable-schedule", Switch).value
         skip_if_sent = self.query_one("#skip-sent", Switch).value
 
         try:
             save_plan(session, message, chosen, allow_repeat_same_day=not skip_if_sent)
-            save_preferences(send_time, enabled, skip_if_sent=skip_if_sent)
-            status = "BẬT" if enabled else "TẮT"
-            self._activity(f"💾 ĐÃ LƯU: {len(chosen)} người nhận | Giờ gửi: {send_time} | Scheduler: {status}")
-            self.notify(f"Đã lưu thành công {len(chosen)} người nhận và cài đặt lịch!", severity="information")
+            save_preferences(send_time, False, skip_if_sent=skip_if_sent)
+            self._activity(f"💾 ĐÃ LƯU: {len(chosen)} người nhận | Giờ tham khảo: {send_time} | Scheduler TUI: VÔ HIỆU HÓA; lịch CLI cần recurring consent.")
+            self.notify(f"Đã lưu {len(chosen)} người nhận và cấu hình; chưa kích hoạt lịch CLI.", severity="information")
             self._update_summary()
         except (ValueError, OSError) as exc:
             self.notify(f"Lỗi khi lưu cấu hình: {exc}", severity="error")
@@ -578,19 +552,21 @@ class TikTokTUI(App):
 
     @work(thread=True, group="send")
     def _run_send(self, source: str) -> None:
+        if source == 'Scheduler':
+            self.call_from_thread(self._activity, 'Legacy scheduler disabled. Review schedule consent through CLI.')
+            return
         import oneshot
         from services import summarize_results
         try:
             from services import send_plan
             import uuid
-            # Existing scheduled task keeps a stable key; manual actions get new IDs.
-            key = ("scheduled:" + self._last_run_time) if source == "Scheduler" else "manual:" + str(uuid.uuid4())
+            key = "manual:" + str(uuid.uuid4())
             def preview_only(row):
                 self.call_from_thread(self._activity, f"Preview request={row['request_id']}: {row['payload_json']}")
                 self.call_from_thread(self._activity, "Request held. Use CLI --send --request-id with this request's stored idempotency key to review and confirm.")
                 return False
             result = asyncio.run(send_plan(CONFIG_PATH, idempotency_key=key,
-                confirm_request=preview_only if source != "Scheduler" else None))
+                confirm_request=preview_only))
             confirmed, skipped, failed = summarize_results(result)
             text = (f"[{source}] ✅ Kết quả: {confirmed} xác nhận thành công | {skipped} bỏ qua | {failed} thất bại.")
             self.call_from_thread(self._activity, text)

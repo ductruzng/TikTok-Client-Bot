@@ -6,6 +6,7 @@ import ssl
 import sys
 import time
 import uuid
+from contextlib import nullcontext, closing
 from typing import Optional, Tuple
 from urllib.parse import urlsplit, urlunsplit
 
@@ -13,6 +14,7 @@ import config
 import ledger
 import ledger_requests
 import circuit_breaker as breaker
+import queue_service
 import log as _log
 from client import LttkClient, apply_ws_auth, build_ws_url, load_ws_auth
 from core.api import get_conversations, get_own_user_id
@@ -85,6 +87,7 @@ async def _send_target_oneshot(
     max_sends_per_window: int = 5,
     window_seconds: int = 300,
     rotation_config=None, existing_request=None, config_loader=None, confirm_request=None, session_name=None,
+    policy_reference=None, policy_config=None, worker_context=None,
 ) -> dict:
     """Execute durable reservation, transmission, and correlated echo confirmation for one target."""
     conv_id = target["conv_id"]
@@ -105,7 +108,8 @@ async def _send_target_oneshot(
     if existing_request is None:
         request, created = ledger_requests.create_request(
             str(canonical_uid), conv_id, key, payload, db_path=db_path, client_msg_id=client_msg_id,
-            rotation_config=rotation_config)
+            rotation_config=rotation_config, session_name=session_name,
+            policy_reference=policy_reference, policy_config=policy_config)
     else:
         request = ledger_requests.get_request(existing_request, db_path=db_path)
         if request['canonical_uid'] != str(canonical_uid) or request['conv_id'] != conv_id:
@@ -134,6 +138,7 @@ async def _send_target_oneshot(
         return {"conv_id": conv_id, "request_id": request_id, "status": "failed_pretransmit",
                 "reason": ledger.REASON_CLIENT_EXCEPTION}
     try:
+        current_config = config_loader() if config_loader else policy_config
         started = ledger_requests.start_transmission(
             request_id, db_path=db_path,
             allow_repeat_same_day=allow_repeat_same_day,
@@ -141,7 +146,8 @@ async def _send_target_oneshot(
             max_sends_per_account_per_day=max_sends_per_account_per_day,
             min_send_interval_seconds=min_send_interval_seconds,
             max_sends_per_window=max_sends_per_window, window_seconds=window_seconds,
-            rotation_config=config_loader() if config_loader else rotation_config, session_name=session_name)
+            rotation_config=current_config if config_loader else rotation_config, session_name=session_name,
+            policy_reference=policy_reference, policy_config=current_config, worker_context=worker_context)
         if not started:
             stored = ledger_requests.get_request(request_id, db_path=db_path)
             return {"conv_id": conv_id, "request_id": request_id, "status": "skipped",
@@ -158,7 +164,7 @@ async def _send_target_oneshot(
                 **(exc.result() if isinstance(exc, ledger_requests.RateLimitError) else {})}
 
     except ledger.LedgerError as exc:
-        return {"conv_id": conv_id, "request_id": request_id, "status": "skipped", "existing_status": "queued", "reason": "snapshot_held", "detail": str(exc)}
+        return {"conv_id": conv_id, "request_id": request_id, "status": "skipped", "existing_status": "queued", "reason": getattr(exc, 'code', 'snapshot_held'), "detail": str(exc)}
 
     send_date = ledger_requests.get_request(request_id, db_path=db_path)['date']
     start_monotonic = time.monotonic()
@@ -334,8 +340,13 @@ async def run_oneshot_send(
     window_seconds: int | None = None,
     request_id: str | None = None,
     confirm_request=None,
+    _run_lock=None,
+    _expected_session=None,
+    _worker_context=None,
 ) -> dict:
     """Execute one-shot streak transmission workflow."""
+    from runtime_paths import contained
+    contained(config_path, private=True)
     ledger.check_ready(db_path)
     if not os.path.exists(config_path):
         raise FileNotFoundError(f"Configuration file not found: {config_path}")
@@ -362,91 +373,139 @@ async def run_oneshot_send(
     if idempotency_key is not None and (not isinstance(idempotency_key, str) or not idempotency_key.strip()):
         raise ValueError("Idempotency key must be a nonempty string")
     session_name = cfg["session"]
+    if _worker_context is not None and (not request_id or confirm_request is not None):
+        raise ledger.LedgerError('Worker execution requires an existing manifest request and separate durable consent')
+    if _expected_session is not None and session_name != _expected_session:
+        raise queue_service.QueueHeld('SESSION_ROUTE_CHANGED', 'Run session differs from the current queue policy; review again')
     message_text = cfg.get("message", "")
     def reload_config():
         with open(config_path, encoding="utf-8-sig") as stream:
             return json.load(stream)
 
-    with ledger.RunLock(os.path.join(os.path.dirname(os.path.abspath(db_path)), 'run.lock')) as run_lock:
+    lock_path = os.path.join(os.path.dirname(os.path.abspath(db_path)), 'run.lock')
+    if _run_lock is not None and (not isinstance(_run_lock, ledger.RunLock) or _run_lock._fd is None
+            or os.path.abspath(_run_lock.lock_path) != lock_path):
+        raise ledger.LockError('Queue execution requires the held database run lock')
+    context = nullcontext(_run_lock) if _run_lock is not None else ledger.RunLock(lock_path)
+    with context as run_lock:
+        try:
+            canonical_uid = queue_service.verified_uid(session_name, db_path=db_path)
+        except queue_service.QueueHeld:
+            breaker.gate(db_path=db_path, session=session_name)
+            raise
+        replay_rows = []
+        if request_id:
+            replay = ledger_requests.get_request(request_id, db_path=db_path)
+            if replay['canonical_uid'] != canonical_uid or not any(t['conv_id'] == replay['conv_id'] for t in targets):
+                raise ledger.LedgerError('Request does not match the verified account and target')
+            if idempotency_key is not None and idempotency_key != replay['idempotency_key']:
+                raise ledger.LedgerError('Resume requires the exact stored idempotency key')
+            replay_rows = [replay]
+        else:
+            for target in targets:
+                key = (queue_service.task_request_key(idempotency_key, target['conv_id']) if idempotency_key else
+                       f"daily:{ledger.get_current_ho_chi_minh_date()}:{target['conv_id']}")
+                replay_rows.append(ledger_requests.lookup_replay(canonical_uid, target['conv_id'], key,
+                    {'target': target, 'message': message_text}, db_path=db_path,
+                    rotation_config=cfg if 'rotation' in cfg else None))
+        if replay_rows and all(r and r['status'] not in ('queued', 'pending') for r in replay_rows):
+            return dict(canonical_uid=canonical_uid, date=ledger.get_current_ho_chi_minh_date(), results=[
+                dict(conv_id=r['conv_id'], request_id=r['request_id'], status='skipped', existing_status=r['status'],
+                     reason='already_' + r['status'], server_msg_id=r['server_msg_id']) for r in replay_rows])
         ledger_requests.recover_pending(db_path=db_path, run_lock=run_lock)
         breaker.gate(db_path=db_path, session=session_name)
-        canonical_uid = None
+        results = []
+        connection = None
+        cookies = None
+        effective_device_id = None
         stage = 'local'
         try:
-            cookies = load_session(session_name)
-            if not cookies or not cookies.get("sessionid"):
-                raise ValueError(
-                    f"Session '{session_name}' not found or missing sessionid cookie. "
-                    f"Please run 'python main.py login' first."
-                )
-
-            stage = "identity"
-            canonical_uid = get_own_user_id(cookies=cookies, use_cache=False)
-            if not canonical_uid:
-                raise breaker.ProtocolFailure("Identity evidence missing")
-            breaker.bind_session(canonical_uid, session_name, db_path=db_path)
-            breaker.gate(db_path=db_path, uid=canonical_uid, session=session_name)
-
-            _log.info("oneshot", f"Authenticated canonical UID: {canonical_uid}")
-
-            stage = "local"
-            # Extract device_id bound to this WS auth if available
-            ws_auth = load_ws_auth(session_name=session_name, cookies=cookies)
-            effective_device_id = ws_auth.get("device_id") if ws_auth else config.DEVICE_ID
-
-            stage = "inbox"
-            if validate_server:
-                validate_against_server_inbox(cookies, targets, device_id=effective_device_id)
-
             if request_id:
                 stored = ledger_requests.get_request(request_id, db_path=db_path)
                 if idempotency_key is not None and idempotency_key != stored['idempotency_key']:
                     raise ledger.LedgerError('Resume requires the exact stored idempotency key')
                 targets = [t for t in targets if t['conv_id'] == stored['conv_id']]
-                if len(targets) != 1 or stored['canonical_uid'] != str(canonical_uid):
-                    raise ledger.LedgerError('Request does not match configured account and target')
-
-            results = []
-            stage = "handshake"
-            prepared_ws = _prepare_ws(cookies, session_name, ws_auth)
-            connection = await _open_ws(*prepared_ws)
-            async with connection as ws:
-                _log.ok("oneshot", "Connected to WebSocket. Processing targets sequentially...")
-                # Handshake ping
-                await asyncio.wait_for(ws.send("hi"), timeout=5.0)
+                if len(targets) != 1 or stored['canonical_uid'] != canonical_uid:
+                    raise ledger.LedgerError('Request does not match the verified account and target')
+            for target in targets:
+                stage = 'local'
+                if request_id:
+                    row = stored
+                else:
+                    day = ledger.get_current_ho_chi_minh_date()
+                    key = (queue_service.task_request_key(idempotency_key, target['conv_id']) if idempotency_key else
+                           f"daily:{day}:{target['conv_id']}")
+                    row, _ = ledger_requests.create_request(canonical_uid, target['conv_id'], key,
+                        {'target': target, 'message': message_text}, db_path=db_path,
+                        rotation_config=cfg if 'rotation' in cfg else None,
+                        session_name=session_name, policy_reference=config_path, policy_config=cfg)
+                if row['status'] != 'queued':
+                    results.append(dict(conv_id=row['conv_id'], request_id=row['request_id'], status='skipped',
+                        reason='already_' + row['status'], existing_status=row['status'], server_msg_id=row['server_msg_id']))
+                    continue
+                # Admission preview before credentials/network. Claim repeats every check atomically.
                 try:
-                    await asyncio.wait_for(ws.recv(), timeout=5.0)
-                except asyncio.TimeoutError:
-                    pass
-
-                for target in targets:
-                    res = await _send_target_oneshot(
-                        ws=ws,
-                        canonical_uid=canonical_uid,
-                        target=target,
-                        message_text=message_text,
-                        timeout_seconds=timeout_seconds,
-                        db_path=db_path,
-                        device_id=effective_device_id,
-                        idempotency_key=(json.dumps([idempotency_key, target["conv_id"]]) if idempotency_key else None),
-                        rotation_config=cfg if "rotation" in cfg else None,
-                        session_name=session_name, existing_request=request_id, config_loader=reload_config, confirm_request=confirm_request,
-                        **settings,
-                    )
-                    results.append(res)
-                    if res.get('status') == 'failed_unknown' or res.get('reason') == 'CIRCUIT_OPEN':
-                        results.extend({'conv_id': t['conv_id'], 'status': 'not_attempted', 'reason': 'CIRCUIT_OPEN'}
-                                       for t in targets[len(results):])
-                        break
-
-            return {
-                "canonical_uid": canonical_uid,
-                "date": ledger.get_current_ho_chi_minh_date(),
-                "results": results,
-            }
+                    with closing(ledger._get_readonly_connection(db_path)) as conn:
+                        import sqlite3
+                        conn.row_factory = sqlite3.Row
+                        conn.execute('BEGIN')
+                        current = reload_config()
+                        if _worker_context is not None:
+                            from worker import check_authorization
+                            check_authorization(conn, row, _worker_context)
+                        ledger_requests.check_admission(conn, row, settings, rotation_config=current,
+                            session_name=session_name, policy_reference=config_path, policy_config=current)
+                except ledger.LedgerError as exc:
+                    result = dict(conv_id=row['conv_id'], request_id=row['request_id'], status='skipped',
+                        existing_status='queued', reason=getattr(exc, 'code', 'quota_claimed' if isinstance(exc, ledger.QuotaExceededError) else 'snapshot_held'), detail=str(exc))
+                    if hasattr(exc, 'result'):
+                        result.update(exc.result())
+                    results.append(result)
+                    continue
+                if confirm_request is not None and not confirm_request(row):
+                    results.append(dict(conv_id=row['conv_id'], request_id=row['request_id'], status='skipped',
+                        existing_status='queued', reason='confirmation_declined'))
+                    continue
+                if connection is None:
+                    cookies = load_session(session_name)
+                    if not cookies or not cookies.get('sessionid'):
+                        raise ValueError('Saved session is missing; explicit login/setup is required')
+                    stage = 'identity'
+                    authenticated_uid = get_own_user_id(cookies=cookies, use_cache=False)
+                    if not authenticated_uid or str(authenticated_uid) != canonical_uid:
+                        raise breaker.ProtocolFailure('Session identity differs from the verified queue binding')
+                    breaker.gate(db_path=db_path, uid=canonical_uid, session=session_name)
+                    stage = 'local'
+                    ws_auth = load_ws_auth(session_name=session_name, cookies=cookies)
+                    effective_device_id = ws_auth.get('device_id') if ws_auth else config.DEVICE_ID
+                    stage = 'inbox'
+                    if validate_server:
+                        validate_against_server_inbox(cookies, targets, device_id=effective_device_id)
+                    stage = 'handshake'
+                    connection = await _open_ws(*_prepare_ws(cookies, session_name, ws_auth))
+                    await asyncio.wait_for(connection.send('hi'), timeout=5.0)
+                    try:
+                        await asyncio.wait_for(connection.recv(), timeout=5.0)
+                    except asyncio.TimeoutError:
+                        pass
+                stage = 'local'
+                res = await _send_target_oneshot(connection, canonical_uid, target, message_text,
+                    timeout_seconds=timeout_seconds, db_path=db_path, device_id=effective_device_id,
+                    existing_request=row['request_id'], rotation_config=cfg if 'rotation' in cfg else None,
+                    session_name=session_name, policy_reference=config_path, policy_config=cfg,
+                    config_loader=reload_config, worker_context=_worker_context, **settings)
+                results.append(res)
+                if res.get('status') == 'failed_unknown' or res.get('reason') == 'CIRCUIT_OPEN':
+                    results.extend(dict(conv_id=t['conv_id'], status='not_attempted', reason='CIRCUIT_OPEN')
+                                   for t in targets[len(results):])
+                    break
+            return dict(canonical_uid=canonical_uid, date=ledger.get_current_ho_chi_minh_date(), results=results)
         except Exception as exc:
-            failure = breaker.classify(exc, stage) if stage != "local" else None
+            failure = breaker.classify(exc, stage) if stage != 'local' else None
             if failure is not None:
                 breaker.record_failure(failure, db_path=db_path, uid=canonical_uid, session=session_name)
                 raise breaker.CircuitOpen(breaker.inspect(db_path=db_path, uid=canonical_uid, session=session_name)) from None
             raise
+        finally:
+            if connection is not None:
+                await connection.close()

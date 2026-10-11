@@ -7,7 +7,7 @@ from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
-VERSION = 5
+VERSION = 8
 
 
 def _migrate_v2(conn, db_path):
@@ -132,8 +132,8 @@ def _inspect(conn):
     version = conn.execute('PRAGMA user_version').fetchone()[0]
     report = {'version': version, 'target_version': VERSION, 'request_count': 0,
               'transmitted_count': 0, 'errors': []}
-    if version not in (2, 3, 4, VERSION):
-        report['errors'].append({'reason': 'Only schema V2, V3, V4 or V5 is supported; no implicit legacy conversion'})
+    if version not in (2, 3, 4, 5, 6, 7, VERSION):
+        report['errors'].append({'reason': 'Only schema V2 through V8 is supported; no implicit legacy conversion'})
         return report
     try:
         _validate_common_schema(conn)
@@ -143,6 +143,9 @@ def _inspect(conn):
         report['request_count'] = len(rows)
         report['unknown_count'] = conn.execute("SELECT count(*) FROM send_requests WHERE status='failed_unknown'").fetchone()[0]
         report['pending_count'] = conn.execute("SELECT count(*) FROM send_requests WHERE status='pending'").fetchone()[0]
+        report['queued_count'] = conn.execute("SELECT count(*) FROM send_requests WHERE status='queued'").fetchone()[0]
+        report['unbound_queued_count'] = (conn.execute("SELECT count(*) FROM send_requests r JOIN queue_entries q USING(request_id) WHERE r.status='queued' AND q.session_name IS NULL").fetchone()[0]
+                                          if version >= 6 else report['queued_count'])
         for request_id, attempted, day, transmitted in rows:
             if not transmitted:
                 continue
@@ -154,7 +157,7 @@ def _inspect(conn):
                     raise ValueError('date differs from attempt_time in Asia/Ho_Chi_Minh')
             except (ValueError, TypeError) as exc:
                 report['errors'].append({'request_id': request_id, 'reason': str(exc)})
-        if version in (3, 4, 5):
+        if version >= 3:
             validate_schema(conn, expected=version)
     except (sqlite3.DatabaseError, ValueError) as exc:
         report['errors'].append({'reason': str(exc)})
@@ -196,7 +199,7 @@ def _validate_common_schema(conn):
 def validate_schema(conn, expected=VERSION):
     """Fail closed even if user_version is correct but required structures are missing."""
     if conn.execute('PRAGMA user_version').fetchone()[0] != expected:
-        raise ValueError('Ledger requires schema V5; run ledger-preflight and explicit ledger-migrate')
+        raise ValueError(f'Ledger requires schema V{expected}; run ledger-preflight and explicit ledger-migrate')
     _validate_common_schema(conn)
     if not conn.execute('SELECT 1 FROM schema_migrations WHERE version=?', (expected,)).fetchone():
         raise ValueError('Missing migration record')
@@ -222,6 +225,40 @@ def validate_schema(conn, expected=VERSION):
         if not required <= objects:
             raise ValueError('Incomplete breaker schema')
         conn.execute('SELECT scope_type,scope_key,state,version,category,opened_at_ms,updated_at_ms,retry_not_before_ms,source_request_id FROM breaker_state LIMIT 0')
+
+    if expected >= 6:
+        required = {'queue_entries', 'queue_no_delete', 'queue_identity', 'queue_route_valid',
+                    'unknown_resolution_events', 'unknown_final_resolution', 'unknown_resolution_valid',
+                    'immutable_unknown_resolution_events_UPDATE', 'immutable_unknown_resolution_events_DELETE'}
+        if not required <= objects:
+            raise ValueError('Incomplete queue/resolution schema')
+        conn.execute('SELECT enqueue_seq,request_id,session_name,policy_reference,policy_fingerprint FROM queue_entries LIMIT 0')
+        conn.execute('SELECT event_id,request_id,action,reason,evidence,preview_fingerprint,at_ms,replacement_request_id FROM unknown_resolution_events LIMIT 0')
+        if conn.execute('SELECT 1 FROM send_requests r LEFT JOIN queue_entries q USING(request_id) WHERE q.request_id IS NULL LIMIT 1').fetchone():
+            raise ValueError('Missing durable queue entry')
+
+    if expected >= 7:
+        required = {'worker_runs', 'worker_run_requests', 'worker_events', 'worker_started_once',
+                    'worker_member_valid', 'worker_event_valid'}
+        for table in ('worker_runs', 'worker_run_requests', 'worker_events'):
+            required.update(f'immutable_{table}_{action}' for action in ('UPDATE', 'DELETE'))
+        if not required <= objects:
+            raise ValueError('Incomplete worker consent schema')
+        conn.execute('SELECT run_id,manifest_fingerprint,consent_json,created_at_ms FROM worker_runs LIMIT 0')
+        conn.execute('SELECT run_id,ordinal,request_id,expected_json FROM worker_run_requests LIMIT 0')
+        conn.execute('SELECT event_id,run_id,event_type,at_ms,details_json FROM worker_events LIMIT 0')
+
+    if expected >= 8:
+        required = {'recurring_grants', 'recurring_events', 'daily_occurrences',
+                    'daily_occurrence_requests', 'recurring_event_valid', 'daily_member_valid'}
+        for table in ('recurring_grants', 'recurring_events', 'daily_occurrences', 'daily_occurrence_requests'):
+            required.update(f'immutable_{table}_{action}' for action in ('UPDATE', 'DELETE'))
+        if not required <= objects:
+            raise ValueError('Incomplete recurring authority schema')
+        conn.execute('SELECT grant_id,schedule_id,fingerprint,consent_json,created_at_ms FROM recurring_grants LIMIT 0')
+        conn.execute('SELECT occurrence_id,canonical_uid,schedule_id,local_date,grant_id,grant_version,run_id,fingerprint,start_ms,end_ms FROM daily_occurrences LIMIT 0')
+        if conn.execute('PRAGMA foreign_key_check').fetchone():
+            raise ValueError('Recurring authority foreign key violation')
 
 
 def _backup(conn, db_path):
@@ -280,6 +317,9 @@ def initialize(db_path):
                 _apply_v3(conn, None)
                 _apply_v4(conn, None)
                 _apply_v5(conn, None)
+                _apply_v6(conn, None)
+                _apply_v7(conn, None)
+                _apply_v8(conn, None)
                 conn.commit()
             except BaseException:
                 conn.rollback()
@@ -365,7 +405,13 @@ def migrate(db_path):
                 _apply_v3(conn, backup_path)
             if report['version'] < 4:
                 _apply_v4(conn, backup_path)
-            _apply_v5(conn, backup_path)
+            if report['version'] < 5:
+                _apply_v5(conn, backup_path)
+            if report['version'] < 6:
+                _apply_v6(conn, backup_path)
+            if report['version'] < 7:
+                _apply_v7(conn, backup_path)
+            _apply_v8(conn, backup_path)
             if conn.execute('PRAGMA integrity_check').fetchone()[0] != 'ok' or conn.execute('PRAGMA foreign_key_check').fetchone():
                 raise ValueError('Post-migration validation failed')
             conn.commit()
@@ -402,4 +448,132 @@ def _apply_v5(conn, backup_path):
                      request_id, event_type='LEGACY_UNKNOWN_IMPORTED', at_ms=instant)
     conn.execute('INSERT INTO schema_migrations VALUES(?,?,?)', (5, datetime.now(timezone.utc).isoformat(), backup_path))
     conn.execute('PRAGMA user_version=5')
+    validate_schema(conn, expected=5)
+
+
+def _apply_v6(conn, backup_path):
+    """Add routing/order and immutable decisions without rewriting request history."""
+    validate_schema(conn, expected=5)
+    conn.execute('''CREATE TABLE queue_entries(
+        enqueue_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        request_id TEXT NOT NULL UNIQUE REFERENCES send_requests(request_id),
+        session_name TEXT, policy_reference TEXT, policy_fingerprint TEXT,
+        CHECK((session_name IS NULL AND policy_reference IS NULL AND policy_fingerprint IS NULL)
+           OR (session_name IS NOT NULL AND policy_reference IS NOT NULL AND policy_fingerprint IS NOT NULL
+               AND length(session_name)>0 AND length(policy_reference)>0 AND length(policy_fingerprint)=64)))''')
+    # Migration order is existing rowid order, not inferred historical wall time.
+    conn.execute('INSERT INTO queue_entries(request_id) SELECT request_id FROM send_requests ORDER BY rowid')
+    conn.execute("CREATE TRIGGER queue_no_delete BEFORE DELETE ON queue_entries BEGIN SELECT RAISE(ABORT,'Immutable queue history'); END")
+    conn.execute('''CREATE TRIGGER queue_identity BEFORE UPDATE ON queue_entries
+        WHEN NEW.enqueue_seq IS NOT OLD.enqueue_seq OR NEW.request_id IS NOT OLD.request_id
+        BEGIN SELECT RAISE(ABORT,'Immutable queue identity'); END''')
+    conn.execute('''CREATE TRIGGER queue_route_valid BEFORE UPDATE ON queue_entries
+        WHEN NOT EXISTS(SELECT 1 FROM send_requests WHERE request_id=OLD.request_id AND status='queued'
+            AND transmitted=0 AND transmission_started_at_ms IS NULL)
+        BEGIN SELECT RAISE(ABORT,'Routing can only change before transmission'); END''')
+    conn.execute('''CREATE TABLE unknown_resolution_events(
+        event_id INTEGER PRIMARY KEY, request_id TEXT NOT NULL REFERENCES send_requests(request_id),
+        action TEXT NOT NULL CHECK(action IN ('KEEP_BLOCKED','CLOSE_WITHOUT_RESEND','AUTHORIZE_REPLACEMENT')),
+        reason TEXT NOT NULL CHECK(length(reason)>0), evidence TEXT NOT NULL CHECK(length(evidence)>0),
+        preview_fingerprint TEXT NOT NULL CHECK(length(preview_fingerprint)=64),
+        at_ms INTEGER NOT NULL CHECK(at_ms>=0), replacement_request_id TEXT UNIQUE REFERENCES send_requests(request_id),
+        CHECK((action='AUTHORIZE_REPLACEMENT' AND replacement_request_id IS NOT NULL)
+           OR (action!='AUTHORIZE_REPLACEMENT' AND replacement_request_id IS NULL)))''')
+    conn.execute("CREATE UNIQUE INDEX unknown_final_resolution ON unknown_resolution_events(request_id) WHERE action IN ('CLOSE_WITHOUT_RESEND','AUTHORIZE_REPLACEMENT')")
+    conn.execute('''CREATE TRIGGER unknown_resolution_valid BEFORE INSERT ON unknown_resolution_events
+        WHEN NOT EXISTS(SELECT 1 FROM send_requests WHERE request_id=NEW.request_id AND status='failed_unknown')
+        OR EXISTS(SELECT 1 FROM unknown_resolution_events WHERE request_id=NEW.request_id AND action!='KEEP_BLOCKED')
+        BEGIN SELECT RAISE(ABORT,'UNKNOWN is missing or already resolved'); END''')
+    for action in ('UPDATE', 'DELETE'):
+        conn.execute(f"CREATE TRIGGER immutable_unknown_resolution_events_{action} BEFORE {action} ON unknown_resolution_events BEGIN SELECT RAISE(ABORT,'Immutable resolution history'); END")
+    conn.execute('INSERT INTO schema_migrations VALUES(?,?,?)', (6, datetime.now(timezone.utc).isoformat(), backup_path))
+    conn.execute('PRAGMA user_version=6')
+    validate_schema(conn, expected=6)
+
+
+def _apply_v7(conn, backup_path):
+    """Worker authority and audit only; request lifecycle/quota stays in V6 tables."""
+    validate_schema(conn, expected=6)
+    conn.execute('''CREATE TABLE worker_runs(
+        run_id TEXT PRIMARY KEY NOT NULL,
+        manifest_fingerprint TEXT NOT NULL CHECK(length(manifest_fingerprint)=64),
+        consent_json TEXT NOT NULL CHECK(json_valid(consent_json)),
+        created_at_ms INTEGER NOT NULL CHECK(typeof(created_at_ms)='integer' AND created_at_ms>=0))''')
+    conn.execute('''CREATE TABLE worker_run_requests(
+        run_id TEXT NOT NULL REFERENCES worker_runs(run_id),
+        ordinal INTEGER NOT NULL CHECK(ordinal>=0),
+        request_id TEXT NOT NULL REFERENCES send_requests(request_id),
+        expected_json TEXT NOT NULL CHECK(json_valid(expected_json)),
+        PRIMARY KEY(run_id,ordinal), UNIQUE(run_id,request_id))''')
+    conn.execute('''CREATE TRIGGER worker_member_valid BEFORE INSERT ON worker_run_requests
+        WHEN NOT EXISTS(SELECT 1 FROM send_requests WHERE request_id=NEW.request_id
+            AND status='queued' AND transmitted=0 AND transmission_started_at_ms IS NULL)
+        BEGIN SELECT RAISE(ABORT,'Worker membership requires an untransmitted queued request'); END''')
+    conn.execute('''CREATE TABLE worker_events(
+        event_id INTEGER PRIMARY KEY, run_id TEXT NOT NULL REFERENCES worker_runs(run_id),
+        event_type TEXT NOT NULL CHECK(event_type IN ('APPROVED','RUN_STARTED','RUNNING',
+            'WAITING_RATE_LIMIT','STOPPED','COMPLETE','WAIT_LIMIT','HELD','NEEDS_OWNER_REVIEW','REVOKED')),
+        at_ms INTEGER NOT NULL CHECK(typeof(at_ms)='integer' AND at_ms>=0),
+        details_json TEXT NOT NULL CHECK(json_valid(details_json)))''')
+    conn.execute("CREATE UNIQUE INDEX worker_started_once ON worker_events(run_id) WHERE event_type='RUN_STARTED'")
+    conn.execute('''CREATE TRIGGER worker_event_valid BEFORE INSERT ON worker_events
+        WHEN NEW.at_ms < COALESCE((SELECT max(at_ms) FROM worker_events WHERE run_id=NEW.run_id),0)
+        BEGIN SELECT RAISE(ABORT,'Worker clock rollback'); END''')
+    for table in ('worker_runs', 'worker_run_requests', 'worker_events'):
+        for action in ('UPDATE', 'DELETE'):
+            conn.execute(f"CREATE TRIGGER immutable_{table}_{action} BEFORE {action} ON {table} BEGIN SELECT RAISE(ABORT,'Immutable worker history'); END")
+    conn.execute('INSERT INTO schema_migrations VALUES(?,?,?)', (7, datetime.now(timezone.utc).isoformat(), backup_path))
+    conn.execute('PRAGMA user_version=7')
+    validate_schema(conn, expected=7)
+
+
+def _apply_v8(conn, backup_path):
+    """Append-only recurring authority; no request/quota/history rewrites."""
+    validate_schema(conn, expected=7)
+    conn.execute('''CREATE TABLE recurring_grants(
+        grant_id TEXT PRIMARY KEY NOT NULL, schedule_id TEXT NOT NULL,
+        fingerprint TEXT NOT NULL CHECK(length(fingerprint)=64),
+        consent_json TEXT NOT NULL CHECK(json_valid(consent_json)),
+        created_at_ms INTEGER NOT NULL CHECK(typeof(created_at_ms)='integer' AND created_at_ms>=0))''')
+    conn.execute('''CREATE TABLE recurring_events(
+        event_id INTEGER PRIMARY KEY, grant_id TEXT NOT NULL REFERENCES recurring_grants(grant_id),
+        version INTEGER NOT NULL CHECK(version>0),
+        event_type TEXT NOT NULL CHECK(event_type IN ('AUTHORIZED','ACTIVATED','PAUSED','REVOKED','HELD')),
+        at_ms INTEGER NOT NULL CHECK(typeof(at_ms)='integer' AND at_ms>=0),
+        details_json TEXT NOT NULL CHECK(json_valid(details_json)), UNIQUE(grant_id,version))''')
+    conn.execute('''CREATE TRIGGER recurring_event_valid BEFORE INSERT ON recurring_events
+        WHEN NEW.version != COALESCE((SELECT max(version) FROM recurring_events WHERE grant_id=NEW.grant_id),0)+1
+        OR NEW.at_ms < COALESCE((SELECT max(at_ms) FROM recurring_events WHERE grant_id=NEW.grant_id),0)
+        OR (NEW.version=1 AND NEW.event_type!='AUTHORIZED')
+        OR (NEW.version>1 AND NOT (
+            (NEW.event_type='ACTIVATED' AND (SELECT event_type FROM recurring_events WHERE grant_id=NEW.grant_id ORDER BY version DESC LIMIT 1)='AUTHORIZED')
+            OR (NEW.event_type IN ('PAUSED','HELD') AND (SELECT event_type FROM recurring_events WHERE grant_id=NEW.grant_id ORDER BY version DESC LIMIT 1)='ACTIVATED')
+            OR (NEW.event_type='REVOKED' AND (SELECT event_type FROM recurring_events WHERE grant_id=NEW.grant_id ORDER BY version DESC LIMIT 1) IN ('AUTHORIZED','ACTIVATED','PAUSED','HELD'))))
+        BEGIN SELECT RAISE(ABORT,'Invalid recurring audit version/time'); END''')
+    conn.execute('''CREATE TABLE daily_occurrences(
+        occurrence_id TEXT PRIMARY KEY NOT NULL, canonical_uid TEXT NOT NULL, schedule_id TEXT NOT NULL,
+        local_date TEXT NOT NULL, grant_id TEXT NOT NULL REFERENCES recurring_grants(grant_id),
+        grant_version INTEGER NOT NULL, run_id TEXT NOT NULL UNIQUE REFERENCES worker_runs(run_id),
+        fingerprint TEXT NOT NULL CHECK(length(fingerprint)=64),
+        start_ms INTEGER NOT NULL CHECK(typeof(start_ms)='integer' AND start_ms>=0),
+        end_ms INTEGER NOT NULL CHECK(typeof(end_ms)='integer' AND end_ms>start_ms),
+        UNIQUE(canonical_uid,schedule_id,local_date),
+        FOREIGN KEY(grant_id,grant_version) REFERENCES recurring_events(grant_id,version))''')
+    conn.execute('''CREATE TABLE daily_occurrence_requests(
+        occurrence_id TEXT NOT NULL REFERENCES daily_occurrences(occurrence_id),
+        request_id TEXT NOT NULL UNIQUE REFERENCES send_requests(request_id),
+        ordinal INTEGER NOT NULL CHECK(ordinal>=0), PRIMARY KEY(occurrence_id,ordinal))''')
+    conn.execute('''CREATE TRIGGER daily_member_valid BEFORE INSERT ON daily_occurrence_requests
+        WHEN NOT EXISTS(SELECT 1 FROM daily_occurrences d JOIN worker_run_requests w ON w.run_id=d.run_id
+            JOIN send_requests r ON r.request_id=w.request_id
+            WHERE d.occurrence_id=NEW.occurrence_id AND w.request_id=NEW.request_id
+            AND w.ordinal=NEW.ordinal AND r.canonical_uid=d.canonical_uid AND r.transmitted=0 AND r.status='queued')
+        BEGIN SELECT RAISE(ABORT,'Invalid daily worker membership'); END''')
+    conn.execute('CREATE INDEX recurring_schedule ON recurring_grants(schedule_id)')
+    conn.execute('CREATE INDEX recurring_history ON recurring_events(grant_id,version)')
+    for table in ('recurring_grants', 'recurring_events', 'daily_occurrences', 'daily_occurrence_requests'):
+        for action in ('UPDATE', 'DELETE'):
+            conn.execute(f"CREATE TRIGGER immutable_{table}_{action} BEFORE {action} ON {table} BEGIN SELECT RAISE(ABORT,'Immutable recurring history'); END")
+    conn.execute('INSERT INTO schema_migrations VALUES(?,?,?)', (8, datetime.now(timezone.utc).isoformat(), backup_path))
+    conn.execute('PRAGMA user_version=8')
     validate_schema(conn)
