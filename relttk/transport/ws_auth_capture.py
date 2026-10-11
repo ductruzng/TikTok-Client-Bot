@@ -31,8 +31,6 @@ def valid_pair(ttwid, access_key):
 
 
 def capture_for_cookies(cookies_dict: dict = None, headless: bool = True):
-    if sys.platform != "win32":
-        raise RuntimeError("Browser auth capture is supported by this project on Windows only")
     from playwright.sync_api import sync_playwright
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=headless)
@@ -142,8 +140,6 @@ def capture_for_cookies(cookies_dict: dict = None, headless: bool = True):
 
 def capture_session_auth(session_name: str, cookies: dict | None = None) -> None:
     from relttk.transport.qrlogin import load_session, write_private_json, ws_auth_path
-    if sys.platform != "win32":
-        raise RuntimeError("Capture auth on Windows, then follow TERMUX.md")
     path = ws_auth_path(session_name)
     if cookies is None:
         cookies = load_session(session_name)

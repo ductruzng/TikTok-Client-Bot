@@ -48,7 +48,33 @@ def get_own_user_id(cookies: dict | None = None, *, use_cache=True) -> str:
 
     if not use_cache:
         from .self_identity import verify_authenticated_self
-        return verify_authenticated_self(html)
+        from relttk.identity.circuit_breaker import ProtocolFailure
+
+        full_uid = verify_authenticated_self(html)
+
+        if not isinstance(session, str) or not session:
+            raise ProtocolFailure("AUTHENTICATED_SESSION_REQUIRED")
+
+        # Verify independently with only the sessionid cookie.
+        isolated_req = urllib.request.Request(
+            "https://www.tiktok.com/messages?lang=es-419",
+            headers={
+                "accept": "text/html",
+                "user-agent": "Mozilla/5.0",
+                "cookie": "sessionid=" + session,
+            },
+        )
+        with urllib.request.urlopen(isolated_req, timeout=10) as response:
+            isolated_html = response.read().decode(
+                "utf-8", errors="replace"
+            )
+
+        isolated_uid = verify_authenticated_self(isolated_html)
+
+        if isolated_uid != full_uid:
+            raise ProtocolFailure("SELF_IDENTITY_COOKIE_CONFLICT")
+
+        return isolated_uid
 
     m = re.search(r'"odinId"\s*:\s*"(\d+)"', html)
     if not m:

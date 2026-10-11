@@ -12,8 +12,9 @@ from relttk.identity.circuit_breaker import ProtocolFailure
 
 
 def verify_authenticated_self(html):
-    # Deliberately no guessed HTML schema, manually supplied UID or config bypass.
-    raise ProtocolFailure('AUTHENTICATED_SELF_CONTRACT_UNVERIFIED')
+    # Accept only the reviewed TikTok app-context schema.
+    # The caller must separately establish credential consistency.
+    return extract_self_uid_candidate(html)
 
 def extract_self_uid_candidate(html: str) -> str:
     matches = re.findall(

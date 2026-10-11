@@ -306,9 +306,6 @@ def cmd_login() -> int:
 
 def cmd_capture_ws_auth(session_name: str) -> int:
     """Explicit Windows browser setup; a handshake probe never sends a DM."""
-    if sys.platform != "win32":
-        print("[!] Capture browser auth on Windows; see TERMUX.md for transfer instructions.")
-        return 1
     try:
         from relttk.transport.ws_auth_capture import capture_session_auth
         capture_session_auth(session_name)
