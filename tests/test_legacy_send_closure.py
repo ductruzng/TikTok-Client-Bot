@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 import client
+from source_checks import client_implementation
 from client import LttkClient, UnsupportedSafetyOperation
 
 LEGACY = ('send_message', 'send_video', 'send_reaction', 'delete_message',
@@ -35,7 +36,8 @@ class LegacyClosureTests(unittest.IsolatedAsyncioTestCase):
         bot._load_session.assert_not_called(); bot._load_plugins.assert_not_called()
 
     async def test_ast_inventory_keeps_all_legacy_sink_methods_guarded(self):
-        tree = ast.parse(Path(client.__file__).read_text(encoding='utf-8'))
+        source = client_implementation(Path(__file__).resolve().parents[1], client)
+        tree = ast.parse(source.read_text(encoding='utf-8'))
         cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'LttkClient')
         methods = {n.name: n for n in cls.body if isinstance(n, ast.AsyncFunctionDef)}
         for name in LEGACY:

@@ -11,7 +11,9 @@ def entry():
             os.dup2(muted.fileno(), 1)
             os.dup2(muted.fileno(), 2)
             sys.stdout = sys.stderr = muted
-            from operations import cli_entry
+            from relttk.compat import enable
+            enable()
+            from relttk.operations import cli_entry
             def invoke():
                 if len(sys.argv) < 2 or sys.argv[1] not in ('schedule-tick','operational-status','ledger-backup') or '--operational-output' not in sys.argv:
                     return 3

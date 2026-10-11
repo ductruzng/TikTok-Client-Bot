@@ -6,9 +6,9 @@ import urllib.request
 import urllib.parse
 
 try:
-    from .. import config
+    from relttk import config
 except ImportError:
-    import config
+    from relttk import config
 
 _ROOT = os.path.dirname(os.path.dirname(__file__))
 _UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
@@ -52,7 +52,7 @@ def get_own_user_id(cookies: dict | None = None, *, use_cache=True) -> str:
 
     m = re.search(r'"odinId"\s*:\s*"(\d+)"', html)
     if not m:
-        from circuit_breaker import ProtocolFailure
+        from relttk.identity.circuit_breaker import ProtocolFailure
         raise ProtocolFailure("Identity evidence missing")
 
     uid = m.group(1)

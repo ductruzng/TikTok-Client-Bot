@@ -48,3 +48,12 @@ venv/
 .venv/
 work/
 verify-venv/
+
+# Explicit additional SQLite/runtime credential names (Phase5A)
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+/session.json
+/credential.json
+/browser-profile/

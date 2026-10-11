@@ -1,192 +1,186 @@
-# ReLttk: manual daily TikTok message
+# TikTok Client Bot
 
-This project uses **unofficial, reverse-engineered TikTok internal APIs**. Whether
-messages sent by this bot count towards TikTok streaks **has not been verified**.
-The network protocol, QR login and Android deployment remain unverified live in
-this safety review. **CLI is the primary runtime on Termux; the Windows TUI is
-an optional configuration interface.**
+This project uses **unofficial, reverse-engineered TikTok internal APIs**.
+Whether messages sent through the bot count towards TikTok streaks **has not
+been verified**. A correlated server echo confirms a server-side message
+outcome, not that the recipient read the message or received a streak credit.
 
-## Default: offline dry-run
+**Identity Contract remains BLOCKED.** Authenticated-self UID provenance has
+not been established; real bootstrap and managed sending fail closed. Offline
+Phase4 acceptance does not authorize live sending, production migration or deployment.
+
+**Debian 13 is the only current staging target.** Termux/Android is retired.
+The existing optional Windows setup/UI modules remain for compatibility.
+
+## Offline dry-run
+
+Run commands from the repository root:
 
 ```sh
 python -B main.py
 ```
 
-The default command reads only the plan. It does not read session cookies, open a
-network connection, load plugins, or open the ledger. The shipped `streak.json`
-is intentionally unconfigured; validation messages and exit code 1 are expected.
+The default command reads only the plan. It does not read session cookies, open
+network connections, load plugins or open the ledger. The shipped `streak.json`
+is intentionally unconfigured; validation messages and exit code1 are expected.
 
-Copy the template to the Git-ignored personal configuration:
+Copy the sample to a Git-ignored personal configuration before editing it:
 
 ```sh
 cp streak.json streak.local.json
 python -B main.py --config streak.local.json
 ```
 
-Fill `session`, the fixed `message`, and selected `targets`. Each target needs
-`conv_id`, `conv_short_id` and `conv_type` (1 = direct, 2 = group). Obtain the exact
-IDs from the selected account's inbox; do not guess IDs. For example, these are
-**dummy values, not usable account or conversation data**:
+Configure the selected session, exact conversation identifiers and message or
+user-defined templates. Do not guess recipient IDs. Changes to a plan do not
+send messages. CLI, retained TUI and future integrations use shared application
+services; legacy mutation entrypoints remain guarded.
 
-```json
-{
-  "session": "my_account",
-  "message": "Chao anh!",
-  "targets": [
-    {"conv_id": "0:1:111:222", "conv_short_id": 8888, "conv_type": 1}
-  ]
-}
+## Source layout and import compatibility
+
+The 22 approved G1–G5 implementations now use the canonical `relttk` namespace:
+
+```text
+main.py / operational_entry.py     supported command entrypoints
+relttk/
+  config.py / log.py / runtime_paths.py / operations.py
+  application/                    CLI, services, retained TUI
+  transport/                      client, one-shot send, QR/auth tools
+  storage/                        ledger, requests, migrations, queue
+  runtime/                        worker, grants, rotation, UNKNOWN resolution
+  identity/                       identity, readiness, circuits
+  compat/legacy/                  22 fixed module aliases
+core/ / signers/ / plugins/        retained protocol and legacy modules
+tools/                            explicit manual Windows tools
+requirements/                     optional dependency groups
 ```
 
-## Explicit network operations, for later manual use
+For integrations, prefer canonical imports, for example
+`from relttk.application import services`. Existing bare imports require explicit
+bootstrap in each new process:
 
-These commands contact TikTok; they are not part of dry-run or offline tests:
+```python
+from relttk.compat import enable
 
-```sh
-python main.py login
-python main.py capture-ws-auth --session my_account
-python main.py list-conversations --session my_account
-python main.py --config streak.local.json --send
+enable()
+import operations  # same module object as relttk.operations
 ```
 
-Login requires an interactive terminal for QR display. No QR URL fallback is
-printed. `--send` and `--dry-run` are mutually exclusive; neither can be combined
-with a subcommand. On Windows, login attempts optional headless Chromium auth
-capture after saving the session. `capture-ws-auth` refreshes auth for an existing
-session: it launches a browser, probes a WebSocket handshake without sending any
-DM, then saves the matching pair. This setup step is **not browser-free**.
+Official entrypoints and the guarded runner establish compatibility themselves.
+The operational entry suppresses output before importing application modules.
+Old moved filenames are not supported script entrypoints. Package initializers
+are inert; importing a module does not authorize sending or initialize a database.
+Root `__init__.py` preserves the legacy client export. `tools/browsercookies.py` and
+`tools/test_ws_capture.py` remain manual REVIEW-only tools; do not run them as staging
+checks. No runtime/session/database directory has moved.
 
-Install core requirements first. Optional Windows components are separate:
+Accepted G5 layout baseline: **451 total, 448 PASS, 3 SKIP, 0 FAIL/ERROR** on
+Windows/Python 3.10. Python 3.13 AST checks alone do not certify runtime behavior.
+See the [final layout verification report](docs/phases/PHASE5D_FINAL.md) for G6
+results, import contracts, rollback evidence and Debian staging blockers.
+
+Optional dependencies are installed explicitly when needed, for example
+`python -m pip install -r requirements/tui.txt` for the full UI test fixture.
+Windows-only auth/cookie extras remain separate; they are not Debian requirements.
+The former root manual filenames have moved: import the Windows cookie helper as
+`from tools import browsercookies`. Browser diagnostics use
+`python -B tools/test_ws_capture.py` only with separate live authorization;
+these tools are not staging test commands. The capture profile location remains
+unchanged. See [root hygiene evidence](docs/phases/PHASE5E.md).
+
+## Documentation
+
+- [Current module architecture and maintenance contracts](docs/architecture/MODULES.md)
+- [Sending safety and limits](#sending-safety-and-limits)
+- [Guarded offline checks](#dependencies-and-guarded-checks)
+- [Debian operations and backup](docs/operations/DEPLOY_DEBIAN.md)
+- [Owner-operated Debian fixture checklist](docs/operations/PHASE4D_OWNER_CHECKLIST.md)
+- [Current security regression evidence](docs/evidence/EVIDENCE_PHASE4_SECURITY.md)
+- [Cleanup audit and approval plan](docs/phases/PHASE5_REPO_CLEANUP_PLAN.md)
+- [Historical security/architecture review](docs/security/REVIEW.md)
+- Phase records: [Ledger V2](docs/phases/PHASE2.md),
+  [rate limits](docs/phases/PHASE3A.md), [rotation](docs/phases/PHASE3B.md),
+  [circuits](docs/phases/PHASE3C.md), [queue/UNKNOWN](docs/phases/PHASE3D.md),
+  [finite worker](docs/phases/PHASE3E.md), [readiness](docs/phases/PHASE4A.md),
+  [identity design](docs/phases/PHASE4A_IDENTITY_CONTRACT_PLAN.md),
+  [bounded recurring grants](docs/phases/PHASE4B.md),
+  [offline deployment artifacts](docs/phases/PHASE4C.md).
+- [Termux retirement notice](TERMUX.md); [archived guide](docs/archive/TERMUX.md)
+  is historical only.
+
+Older phase documents preserve their original decisions and test counts. They
+are not claims that the current release was retested at those earlier milestones.
+
+## Dependencies and guarded checks
+
+Core CLI requirements remain separate from optional components:
 
 ```sh
 python -m pip install -r requirements.txt
-python -m pip install -r requirements-tui.txt
-python -m pip install -r requirements-auth-windows.txt
-python -m playwright install chromium
-python -B main.py tui
+python -B main.py --help
+python -B tests/run_offline.py
 ```
 
-TUI inbox sync and QR login require explicit button presses. Plan edits do not
-send. The manual send button sends the **saved** plan, not unsaved selections.
-Its optional scheduler defaults off and only runs while the TUI remains open;
-it triggers in the configured minute, without catch-up after sleep/closure.
-Saving an enabled schedule explicitly permits future sends, including after
-reopening the TUI. Neither CLI nor installation enables a scheduler. No cron,
-Tasker or Termux:Boot job is installed by this project.
+Historical Phase4 security baseline on Windows/Python3.10: **390 total, 387 PASS,
+3 SKIP, 0 FAIL/ERROR**. The skips cover POSIX permissions and two SQLite WAL
+capability tests. The [evidence record](docs/evidence/EVIDENCE_PHASE4_SECURITY.md)
+contains the original result/provenance. The full baseline includes optional
+Textual UI coverage; a core-only environment with additional UI skips is not
+an equivalent result. `requirements/tui.txt` is available for the disposable
+full-test fixture. Windows auth/cookie extras are in
+`requirements/auth-windows.txt` and `requirements/windows.txt`.
 
-Auth is stored in `sesion/ws-auth/<session>.json` and bound to the session cookie
-fingerprint. A changed login requires recapture. The old global
-`ws_auth.local.json` and persistent browser profile are **not used by the one-shot
-sender**; old files are left untouched. Recapture on Windows instead of renaming
-an unbound file. Transfer the matching session/auth pair privately to Termux as
-described in TERMUX.md. Missing/mismatched auth stops before opening WebSocket.
+Use the guarded runner rather than an unrestricted test discovery command.
+It blocks external networking and protected runtime-data access while tests
+use synthetic fixtures and fake WebSockets. Debian13/Python3.13 permissions,
+locking, dependency builds and SQLite WAL capabilities require separate offline
+fixture verification. A venv isolates dependencies, **not security privileges**.
+No scheduler/service is installed or activated by these source artifacts.
 
-Live connectivity is **not ready to be assumed working**: old embedded sample
-session tokens were removed, and device/SDK/signature parameters in the inherited
-protocol still need verification with a current session. Do not put real tokens
-into tracked source files to work around a failed connection.
+## Sending safety and limits
 
-## Quota and confirmation
+- `send_requests` is the durable source of quota and transmission markers;
+  account/day and conversation/day use `Asia/Ho_Chi_Minh`. Defaults are local
+  policy, not TikTok-guaranteed thresholds for avoiding bot detection.
+- Idempotency is independent of intentional repeat. Replay does not reserve or
+  send again; repeat requires explicit settings and remains subject to limits.
+- UNKNOWN consumes quota and blocks further requests until reviewed, across days.
+  Resolution does not manufacture SUCCESS, refund quota or advance rotation.
+- Template snapshots are immutable. SUCCESS advances rotation; FAILED/CANCELLED
+  do not randomize another selection. Stale snapshots need separate confirmation.
+- FIFO/atomic claim and all binding, budget, circuit and consent gates apply to
+  managed CLI/TUI/worker paths. The finite worker processes existing approved
+  requests only; it does not auto-enqueue or retry UNKNOWN.
+- Preview/status/dry-run never imply authorization. Recurring grants require
+  explicit authorization/activation. Old TUI schedule preferences do not grant
+  permission to send automatically. Identity BLOCKED prevents live use.
 
-- A persistent SQLite ledger in `state/` reserves each account/conversation/date
-  **before transmission**, using `Asia/Ho_Chi_Minh`. A process lock and database
-  transaction prevent concurrent duplicate reservations.
-- Only a server message echo matching the outgoing UUID, selected conversation,
-  actual own sender, positive server message ID and exact text records success.
-  Socket send completion, a generic ACK and a local echo are not confirmation.
-- A timeout or error is `failed_unknown`, with no retry that day. A crash-left
-  `pending` blocks later dates too, until manually reviewed. Cross-midnight
-  confirmation/failure also reserves the later date conservatively.
-- There is no force-send option or quota bypass. Failed/unknown and pending
-  records are not deleted to allow another attempt.
-- This limit is local to one ledger. It cannot cover another device, deleted
-  state, or messages sent manually in the TikTok app. Keep the phone clock correct.
-- Dry-run does not inspect quota because it never authenticates or reads state.
-  `python main.py status` inspects local ledger records.
+## Credentials, services and remaining risks
 
-## Security and services
+QR login/inbox/profile/message helpers reference TikTok web/internal endpoints,
+including www.tiktok.com, web-sg.tiktok.com, im-api-sg.tiktok.com and
+im-ws-sg.tiktok.com. Signing runs locally. Retained media helpers reference
+TikTok CDNs; legacy media mutations remain unsupported by the Safety Layer.
+Sample plugins/stranger automation are disabled; the former external video
+upload plugin is inert and protected by regression tests.
 
-QR login uses `www.tiktok.com` and `web-sg.tiktok.com`; inbox/profile APIs also use
-`im-api-sg.tiktok.com`; messaging defaults to `im-ws-sg.tiktok.com` over verified TLS.
-Signing runs locally. Legacy media helpers reference TikTok media CDNs. Sample
-plugins and stranger auto-accept are disabled by default; the former video upload
-plugin to `linkmail.wtf` is inert and has no download/upload implementation.
+Session/auth JSON is plaintext sensitive material. Existing private writes,
+POSIX permissions, symlink checks and session binding remain necessary;
+Windows chmod alone does not establish NTFS ACLs. No real credential, cookie,
+auth URL, runtime DB, browser profile or private capture belongs in source/Git.
+The inherited manual browser diagnostic is not an offline test or staging command.
 
-Sessions are **plaintext** JSON in `sesion/`, with directory mode 0700 and file
-mode 0600 on POSIX, including session-bound WS auth. Writes are atomic; permission
-failures stop access. Browser capture uses a fresh non-persistent context and
-keeps the candidate in memory until a successful probe. Windows
-`chmod` does not configure NTFS ACLs. Use a private user directory. Cookies,
-sessions, state, local plans and logs are ignored by Git. Authentication errors
-omit raw responses; log filtering additionally redacts sensitive values.
-A Python `venv` isolates dependencies, **not security privileges**.
+The embedded upstream WS key and its fallback were removed. URL construction
+requires an explicit valid key and matching ttwid; URL/config authentication
+parameters are rejected. This preserves session-bound auth; it does not establish
+the Identity Contract. Live auth/capture/probe/login commands contact TikTok and
+must not be invoked during offline staging or cleanup.
 
-## Termux and offline checks
-
-See [TERMUX.md](TERMUX.md) for Samsung S21 Ultra / Android ARM64 setup, dependency
-notes, remaining blockers and safe manual commands.
-
-```sh
-python -B -m unittest discover -s tests -v
-python -m pip check
-```
-
-Tests use temporary files, synthetic messages and fake WebSockets. They do not
-prove TikTok accepts the current protocol or credits streaks.
-The optional TUI smoke test is skipped when Textual is absent. Tested locally on
-Windows/Python 3.10 with Textual 8.2.8 and Playwright 1.63.0 installed; browser
-capture and live TikTok operations were not run.
-
-## Finite queue worker (Phase 3E)
-
-See [PHASE3E.md](PHASE3E.md) for SQLite V7, explicit manifest consent,
-`worker-preview`, `worker-authorize`, `worker-status`, `worker-run` and
-`worker-revoke`. The worker processes existing approved requests only. It can
-wait for temporal admission limits within its original deadline; it never
-enqueues work or retries UNKNOWN. Preview/status/default run are read-only.
-Real migration and live sending remain subject to separate Owner approval.
-Guarded offline regression: `python -B tests/run_offline.py` (281 PASS).
-
-## Production readiness (Phase 4A)
-
-[PHASE4A.md](PHASE4A.md) documents explicit runtime paths, non-mutating
-`runtime-preflight` and identity administration. **Real bootstrap and managed
-sending currently fail closed:** authenticated-self UID provenance has not yet
-been established, and a generic `odinId` is not accepted as evidence. This is
-an offline readiness implementation, not approval for live sending or deployment.
+Previously published Git history/clones may retain the old literal. Its owner
+should revoke/rotate it if possible. History cleanup needs separate coordinated
+approval; ignore rules do not sanitize already tracked or historical content.
+No history rewrite is performed by this project cleanup.
 
 ## License
 
-MIT
-# Phase 4B offline daily automation
-
-Bounded recurring grants and one-shot `schedule-tick` are documented in
-[PHASE4B.md](PHASE4B.md). Default operation is preview; authorize and activate
-are separate interactive actions. SQLite V8 requires explicit administration.
-No scheduler is installed. Identity Contract remains blocked; online operation
-is not certified. Old TUI enabled preferences do not authorize automatic sends.
-
-# Phase 4C offline deployment artifacts
-
-See [DEPLOY_DEBIAN.md](DEPLOY_DEBIAN.md) for staged units, safe operational
-metadata, explicit SQLite backup and non-destructive recovery. No service is
-installed or activated by these artifacts. Identity remains BLOCKED; actual
-Debian/systemd/live verification is separate. WAL backup requires Python's
-SQLite no-checkpoint-on-close capability. Rendering supports one recipient per
-grant and rejects unsupported workloads.
-
-## WebSocket credential removal
-
-The embedded upstream WebSocket access key and implicit fallback have been
-removed. URL construction requires an explicit, valid browser-issued key and
-matching ttwid; authentication parameters in base URLs or extra configuration
-are rejected. Managed sending continues to load the pair bound to the selected
-session. This does not establish the Identity Contract or authorize live use.
-
-Previously published Git history or existing clones may still contain the old
-literal. Treat it as potentially exposed credential material: the credential
-owner should revoke/rotate it if possible. History cleanup requires a separately
-approved, coordinated operation covering branches, tags and downstream clones;
-no history rewrite was performed. Ignore rules do not remove already tracked
-credentials or historical content.
-
+MIT. See [LICENSE](LICENSE).

@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, urlsplit
 import client
 import config
 import oneshot
+from source_checks import assert_ws_sources, source_paths
 
 
 class WSAuthBoundaryTests(unittest.TestCase):
@@ -97,26 +98,4 @@ class WSAuthBoundaryTests(unittest.TestCase):
 
     def test_static_source_has_no_embedded_ws_key(self):
         root = Path(__file__).resolve().parents[1]
-        paths = list(root.glob('*.py'))
-        for directory in ('core', 'signers', 'plugins', 'deploy', 'tests'):
-            paths.extend((root / directory).rglob('*.py'))
-        for path in paths:
-            tree = ast.parse(path.read_text(encoding='utf-8-sig'))
-            for node in ast.walk(tree):
-                names = []
-                value = None
-                if isinstance(node, (ast.Assign, ast.AnnAssign)):
-                    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-                    names = [t.id for t in targets if isinstance(t, ast.Name)]
-                    value = node.value
-                if any(n.upper() == 'WS_ACCESS_KEY' for n in names):
-                    self.fail(f'Forbidden WS default assignment: {path.name}:{node.lineno}')
-                if path.parent.name != 'tests' and any(n.lower() == 'access_key' for n in names) and isinstance(value, ast.Constant):
-                    self.assertFalse(bool(value.value), f'Embedded key: {path.name}:{node.lineno}')
-                if path.parent.name != 'tests' and isinstance(node, ast.Dict):
-                    for k, v in zip(node.keys, node.values):
-                        if isinstance(k, ast.Constant) and k.value == 'access_key' and isinstance(v, ast.Constant):
-                            self.assertFalse(bool(v.value), f'Embedded key: {path.name}:{node.lineno}')
-                if isinstance(node, ast.Constant) and isinstance(node.value, str):
-                    self.assertIsNone(re.search(r'access_key=[0-9a-fA-F]{32}(?:&|$)', node.value),
-                                      f'Embedded URL key: {path.name}:{node.lineno}')
+        assert_ws_sources(self, source_paths(root))

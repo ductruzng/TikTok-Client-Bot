@@ -1,1 +1,1 @@
-from .client import LttkClient
+from relttk.transport.client import LttkClient
